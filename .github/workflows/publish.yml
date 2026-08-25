@@ -2,6 +2,9 @@ name: publish
 on:
   push:
     tags: ['v*']
+permissions:
+  contents: read
+  id-token: write   # NuGet Trusted Publishing (OIDC), no API key stored
 jobs:
   publish:
     runs-on: ubuntu-latest
@@ -10,5 +13,13 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
+      - uses: NuGet/login@v1
+        id: login
+        with:
+          user: nexovirt   # nuget.org username
       - run: dotnet pack src/NexoVirt.Sdk/NexoVirt.Sdk.csproj -c Release -o out -p:Version="${GITHUB_REF_NAME#v}"
-      - run: dotnet nuget push "out/*.nupkg" --api-key "${{ secrets.NUGET_API_KEY }}" --source https://api.nuget.org/v3/index.json --skip-duplicate
+      - run: >
+          dotnet nuget push "out/*.nupkg"
+          --api-key "${{ steps.login.outputs.NUGET_API_KEY }}"
+          --source https://api.nuget.org/v3/index.json
+          --skip-duplicate
