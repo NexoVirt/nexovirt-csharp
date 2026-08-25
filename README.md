@@ -1,11 +1,11 @@
 # NexoVirt SDK for .NET / C#
 
-Official .NET client for the [NexoVirt](https://nexovirt.com) REST API — a clean,
+Official .NET client for the [NexoVirt](https://nexovirt.com) REST API, a clean,
 token-authenticated API over Proxmox VE for managing hosts, guests (KVM VMs + LXC
 containers), plans, IPAM, firewall, snapshots and more.
 
 - **Docs:** [NexoVirt REST API reference](https://docs.nexovirt.com/api)
-- **What is NexoVirt:** a self-hosted control panel and REST API for Proxmox VE — [nexovirt.com](https://nexovirt.com)
+- **What is NexoVirt:** a self-hosted control panel and REST API for Proxmox VE. See [nexovirt.com](https://nexovirt.com)
 
 Generated from the NexoVirt [OpenAPI specification](https://docs.nexovirt.com/api), so it
 always matches the live API. Targets `net8.0`. See [Regenerating](#regenerating) below.
@@ -57,4 +57,4 @@ This SDK is generated with [OpenAPI Generator](https://openapi-generator.tech):
 
 ## License
 
-MIT — see [LICENSE](./LICENSE).
+MIT. See [LICENSE](./LICENSE).
