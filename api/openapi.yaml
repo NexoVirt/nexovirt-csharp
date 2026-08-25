@@ -1,0 +1,6021 @@
+openapi: 3.1.0
+info:
+  contact:
+    email: hello@nexovirt.com
+    name: NexoVirt
+  description: |
+    A clean REST API over Proxmox VE, exposed by the NexoVirt panel at `/api/v1`.
+
+    Use it to discover placement (nodes, storages, networks), discover provisioning
+    inputs (plans, OS templates, CT templates, IP zones, SSH keys), create QEMU VMs and
+    LXC containers, run lifecycle actions (power, reinstall, password reset, IP config,
+    delete), and poll asynchronous jobs and live PVE tasks to completion, all without
+    touching the web UI.
+
+    ## Response envelope
+
+    Every response is JSON shaped as `{ success, data, error }`. On success, `success` is
+    `true`, `data` holds the payload, and `error` is `null`. On failure, `success` is
+    `false`, `data` is `null`, and `error` is a human-readable message, alongside a
+    matching HTTP status code (`400`, `401`, `403`, `404`, `409`, `422`, `502`).
+
+    List endpoints that paginate add a `meta` object: `{ page, perPage, total }`. Request
+    a page with `?page=<n>&perPage=<1..200>` (default `perPage` is 50, clamped to 200).
+
+    ## Authentication
+
+    Every request needs `Authorization: Bearer <token>`. Create tokens in the panel under
+    Settings, API tokens. A token may be host-scoped (restricted to certain host ids),
+    IP-allowlisted, and rate-limited. A scoped token gets `403 Forbidden` on any
+    `/hosts/{id}/...` path it is not permitted to touch.
+
+    ## Content type
+
+    Send `Content-Type: application/json` for POST bodies. Form-encoded bodies also work.
+
+    ## Async guest creation
+
+    `POST /hosts/{id}/guests` enqueues a provisioning job and returns immediately with
+    `{ queued: true, job_id, vmid }`. Poll `GET /hosts/{id}/jobs/{jobId}` until
+    `data.status` reaches a terminal state, either `done` or `failed` (transitions through
+    `queued` then `running`). On failure, `data.error` carries the reason. The same
+    executor that backs the web wizard runs the actual PVE work.
+  license:
+    name: Proprietary
+  title: NexoVirt REST API
+  version: v1
+servers:
+- description: Your NexoVirt panel (admin token)
+  url: "https://{host}/api/v1"
+  variables:
+    host:
+      default: your-panel-host
+      description: The hostname (and optional port) of your NexoVirt panel installation.
+- description: "Your NexoVirt panel, reseller-scoped API (reseller token)"
+  url: "https://{host}/api/reseller"
+  variables:
+    host:
+      default: your-panel-host
+      description: The hostname (and optional port) of your NexoVirt panel installation.
+security:
+- bearerAuth: []
+tags:
+- description: Configured Proxmox VE hosts and their live nodes.
+  name: Hosts & nodes
+- description: "DB-backed storage and network inventory, fast reads with no live PVE\
+    \ call."
+  name: Inventory
+- description: "Everything a caller needs to learn before calling create, vmids, plans,\
+    \ templates, IP zones, SSH keys."
+  name: Provisioning discovery
+- description: "List, inspect, create, and operate QEMU VMs and LXC containers."
+  name: Guests
+- description: Poll asynchronous provisioning jobs and live PVE tasks to completion.
+  name: Jobs & tasks
+- description: "Customer accounts, guest ownership, SSH keys and customer IP pools\
+    \ (admin token required)."
+  name: Users
+- description: "Per-guest firewall rules and options, reconciled to PVE."
+  name: Firewall
+- description: Per-host NAT and port-forwarding.
+  name: Networking
+- description: Alert instances and alert rules.
+  name: Alerts
+- description: |
+    Admin management of resellers, their assigned nodes/IP zones, and reseller quota plans. Requires an admin `/api/v1` bearer token. Enterprise-only, `403` otherwise.
+  name: Resellers (admin)
+- description: |
+    A reseller's own customer accounts and their SSH keys, via the separate `/api/reseller` server and a reseller bearer token. Every endpoint is scoped to the calling reseller's own subtree; a cross-tenant id is a `404`, not a `403`.
+  name: "Reseller: Customers"
+- description: "Guest lifecycle (create, inspect, power, delete) over a reseller's\
+    \ own subtree."
+  name: "Reseller: Guests"
+- description: "A reseller customer's SSH public keys (id/name/fingerprint only, never\
+    \ the key body)."
+  name: "Reseller: SSH keys"
+- description: "Static IP changes for a reseller's own guests, within zones assigned\
+    \ to them."
+  name: "Reseller: Networking"
+- description: Read-only plan availability and per-customer usage for the calling
+    reseller.
+  name: "Reseller: Plans & usage"
+paths:
+  /hosts:
+    get:
+      description: |
+        Returns the panel's configured PVE hosts, scoped to the calling token's host_scope (an unscoped token sees all hosts). Never includes credentials.
+      operationId: listHosts
+      responses:
+        "200":
+          content:
+            application/json:
+              example:
+                success: true
+                error: null
+                data:
+                - id: 1
+                  name: Test
+                  hostname: 188.40.137.121
+                  port: 8006
+                  user: root@pam
+                  active: true
+              schema:
+                $ref: "#/components/schemas/listHosts_200_response"
+          description: Configured hosts.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+      summary: List configured hosts
+      tags:
+      - Hosts & nodes
+    post:
+      description: Creates an encrypted host row; SSH agent onboarding stays a panel
+        action. Never returns secrets.
+      operationId: createHost
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/createHost_request"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Created.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+      summary: Create a host
+      tags:
+      - Hosts & nodes
+  /hosts/{hostId}/nodes:
+    get:
+      description: Live PVE node list for the given host (real-time call to Proxmox).
+      operationId: listNodes
+      parameters:
+      - $ref: "#/components/parameters/HostId"
+      responses:
+        "200":
+          content:
+            application/json:
+              example:
+                success: true
+                error: null
+                data:
+                - node: pve1
+                  status: online
+                  cpu: 0.03
+                  maxcpu: 8
+                  mem: 4294967296
+                  maxmem: 34359738368
+                  disk: 21474836480
+                  maxdisk: 107374182400
+                  uptime: 1234567
+                  level: ""
+              schema:
+                $ref: "#/components/schemas/listNodes_200_response"
+          description: Live node list.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+      summary: List a host's live nodes
+      tags:
+      - Hosts & nodes
+  /hosts/{hostId}/nodes/{node}:
+    get:
+      description: |
+        Live PVE node status for a single node (CPU info, memory, root filesystem, load average, PVE version, and so on). The response passes through Proxmox's own node status object.
+      operationId: getNode
+      parameters:
+      - $ref: "#/components/parameters/HostId"
+      - $ref: "#/components/parameters/NodeName"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/getNode_200_response"
+          description: Live node status.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+      summary: Get live node detail
+      tags:
+      - Hosts & nodes
+  /hosts/{hostId}/nodes/{node}/usage:
+    get:
+      description: |
+        Chart-ready time series built from the DB-backed node metrics table, not a live PVE call. Points are `[epoch_ms, value]` pairs.
+      operationId: getNodeUsage
+      parameters:
+      - $ref: "#/components/parameters/HostId"
+      - $ref: "#/components/parameters/NodeName"
+      - $ref: "#/components/parameters/Range"
+      - $ref: "#/components/parameters/Metrics"
+      responses:
+        "200":
+          content:
+            application/json:
+              example:
+                success: true
+                error: null
+                data:
+                  range: 30m
+                  series:
+                  - name: cpu
+                    unit: '%'
+                    points:
+                    - - 1752480000000
+                      - 3.2
+                    - - 1752480030000
+                      - 4.1
+                  - name: mem
+                    unit: '%'
+                    points:
+                    - - 1752480000000
+                      - 41.7
+                    - - 1752480030000
+                      - 42.0
+              schema:
+                $ref: "#/components/schemas/getNodeUsage_200_response"
+          description: Node usage series.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+      summary: Node CPU/mem/disk/net time series
+      tags:
+      - Hosts & nodes
+  /hosts/{hostId}/usage/summary:
+    get:
+      description: |
+        Guests up/down/total and summed cores/memory/disk across the host's latest inventory snapshot, DB-backed, no live PVE call.
+      operationId: getUsageSummary
+      parameters:
+      - $ref: "#/components/parameters/HostId"
+      responses:
+        "200":
+          content:
+            application/json:
+              example:
+                success: true
+                error: null
+                data:
+                  guests:
+                    up: 7
+                    down: 2
+                    total: 9
+                  cores: 24
+                  mem: 68719476736
+                  disk: 900000000000
+              schema:
+                $ref: "#/components/schemas/getUsageSummary_200_response"
+          description: Usage summary.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+      summary: Host usage summary
+      tags:
+      - Hosts & nodes
+  /hosts/{hostId}/storages:
+    get:
+      description: |
+        Node storages from the latest inventory snapshot (DB-backed, no live PVE read). With `?node=`, returns that node's storages plus any datacenter-wide/shared entries (a row with an empty node, for example shared NFS or PBS storage, matches every node). Paginated. Filter by `content` client-side, for example `images` for VM disks or `rootdir` for LXC.
+      operationId: listStorages
+      parameters:
+      - $ref: "#/components/parameters/HostId"
+      - $ref: "#/components/parameters/NodeQuery"
+      - $ref: "#/components/parameters/Page"
+      - $ref: "#/components/parameters/PerPage"
+      responses:
+        "200":
+          content:
+            application/json:
+              example:
+                success: true
+                error: null
+                data:
+                - id: local-lvm
+                  node: pve1
+                  type: lvmthin
+                  total: 500000000000
+                  used: 120000000000
+                  avail: 380000000000
+                  used_pct: 24.0
+                  content: "images,rootdir"
+                  active: true
+                meta:
+                  page: 1
+                  perPage: 50
+                  total: 3
+              schema:
+                $ref: "#/components/schemas/listStorages_200_response"
+          description: Storages.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+      summary: List storages
+      tags:
+      - Inventory
+  /hosts/{hostId}/networks:
+    get:
+      description: |
+        Node network interfaces from the latest inventory snapshot (DB-backed, no live PVE read), enriched with bridge classification. `role` is one of `WAN`, `Private`, `Internal`, or `Other`. Paginated.
+      operationId: listNetworks
+      parameters:
+      - $ref: "#/components/parameters/HostId"
+      - $ref: "#/components/parameters/NodeQuery"
+      - $ref: "#/components/parameters/Page"
+      - $ref: "#/components/parameters/PerPage"
+      responses:
+        "200":
+          content:
+            application/json:
+              example:
+                success: true
+                error: null
+                data:
+                - iface: vmbr0
+                  node: pve1
+                  type: bridge
+                  role: WAN
+                  cidr: 203.0.113.0/24
+                  gateway: 203.0.113.1
+                  ports: eno1
+                  active: true
+                meta:
+                  page: 1
+                  perPage: 50
+                  total: 2
+              schema:
+                $ref: "#/components/schemas/listNetworks_200_response"
+          description: Network interfaces.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+      summary: List network interfaces
+      tags:
+      - Inventory
+  /hosts/{hostId}/next-vmid:
+    get:
+      description: |
+        A free VMID from the live PVE `cluster/nextid` call. Create still requires an explicit `vmid` in the body; use this to obtain one.
+      operationId: getNextVmid
+      parameters:
+      - $ref: "#/components/parameters/HostId"
+      responses:
+        "200":
+          content:
+            application/json:
+              example:
+                success: true
+                error: null
+                data:
+                  next_vmid: 105
+              schema:
+                $ref: "#/components/schemas/getNextVmid_200_response"
+          description: Next free VMID.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+      summary: Get the next free VMID
+      tags:
+      - Provisioning discovery
+  /hosts/{hostId}/plans:
+    get:
+      description: |
+        Active resource plans usable as `plan_id` at create time. A plan fills and locks `cores`, `memory_mb`, and `disk_gb` on the created guest. Paginated.
+      operationId: listPlans
+      parameters:
+      - $ref: "#/components/parameters/HostId"
+      - $ref: "#/components/parameters/Page"
+      - $ref: "#/components/parameters/PerPage"
+      responses:
+        "200":
+          content:
+            application/json:
+              example:
+                success: true
+                error: null
+                data:
+                - id: 2
+                  name: Standard
+                  description: "2 vCPU, 2 GB RAM, 20 GB disk"
+                  cores: 2
+                  memory_mb: 2048
+                  disk_gb: 20
+                  traffic_limit_gb: 1000
+                  runtime_days: 30
+                  grace_days: 3
+                  snapshot_limit: 3
+                meta:
+                  page: 1
+                  perPage: 50
+                  total: 4
+              schema:
+                $ref: "#/components/schemas/listPlans_200_response"
+          description: Resource plans.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+      summary: List resource plans
+      tags:
+      - Provisioning discovery
+  /hosts/{hostId}/os-templates:
+    get:
+      description: |
+        Cloud-init OS templates for QEMU. `ref` (for example `tpl:7`) is the exact `os_template` value to send at create. Never returns SSH keys or other cloud-init secrets. Paginated.
+      operationId: listOsTemplates
+      parameters:
+      - $ref: "#/components/parameters/HostId"
+      - $ref: "#/components/parameters/Page"
+      - $ref: "#/components/parameters/PerPage"
+      responses:
+        "200":
+          content:
+            application/json:
+              example:
+                success: true
+                error: null
+                data:
+                - id: 7
+                  ref: tpl:7
+                  name: Ubuntu 24.04
+                  description: Ubuntu 24.04 LTS cloud image
+                  ostype: l26
+                  ci_user: ubuntu
+                  group_id: 1
+                  group_name: General
+                  is_shipped: true
+                meta:
+                  page: 1
+                  perPage: 50
+                  total: 6
+              schema:
+                $ref: "#/components/schemas/listOsTemplates_200_response"
+          description: QEMU OS templates.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+      summary: List QEMU OS templates
+      tags:
+      - Provisioning discovery
+  /hosts/{hostId}/ct-templates:
+    get:
+      description: |
+        LXC template options. `managed` is the panel's own CT template library (`lxc_template_id` is the create argument, staged on demand). `available` is live PVE `vztmpl` volumes on `?node` (only populated when a valid `node` is given; `volid` is the create argument). Without `?node`, `available` is an empty array and no PVE call is made. Not paginated.
+      operationId: listCtTemplates
+      parameters:
+      - $ref: "#/components/parameters/HostId"
+      - $ref: "#/components/parameters/NodeQuery"
+      responses:
+        "200":
+          content:
+            application/json:
+              example:
+                success: true
+                error: null
+                data:
+                  managed:
+                  - lxc_template_id: 3
+                    name: Debian 12
+                    description: Debian 12 bookworm
+                    ostype: debian
+                    arch: amd64
+                    unprivileged: true
+                    group_id: 1
+                    source: shipped
+                  available:
+                  - volid: local:vztmpl/debian-12-standard_12.7-1_amd64.tar.zst
+                    node: pve1
+                    format: tar.zst
+                    size: 134217728
+              schema:
+                $ref: "#/components/schemas/listCtTemplates_200_response"
+          description: Managed and available LXC templates.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+      summary: List LXC container templates
+      tags:
+      - Provisioning discovery
+  /hosts/{hostId}/ip-zones:
+    get:
+      description: |
+        The host's IP zones (IPAM). `ref` (for example `zone:3`) is the exact `ip_source` create value; using it allocates a static IP from the zone's pool. Paginated.
+      operationId: listIpZones
+      parameters:
+      - $ref: "#/components/parameters/HostId"
+      - $ref: "#/components/parameters/Page"
+      - $ref: "#/components/parameters/PerPage"
+      responses:
+        "200":
+          content:
+            application/json:
+              example:
+                success: true
+                error: null
+                data:
+                - id: 3
+                  ref: zone:3
+                  name: Private LAN
+                  family: ipv4
+                  bridge: vmbr1
+                  cidr: 10.10.0.0/24
+                  gateway: 10.10.0.1
+                  vlan: ""
+                  is_active: true
+                meta:
+                  page: 1
+                  perPage: 50
+                  total: 1
+              schema:
+                $ref: "#/components/schemas/listIpZones_200_response"
+          description: IP zones.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+      summary: List IP zones
+      tags:
+      - Provisioning discovery
+  /users/{userId}/ssh-keys:
+    get:
+      description: |
+        A user's stored SSH keys, exposing only `id`, `name`, and `fingerprint`, never the key body. Pass the owner's id as `owner_id` at create to auto-inject all of that user's stored keys. Not paginated.
+      operationId: listUserSshKeys
+      parameters:
+      - $ref: "#/components/parameters/UserId"
+      responses:
+        "200":
+          content:
+            application/json:
+              example:
+                success: true
+                error: null
+                data:
+                - id: 5
+                  name: laptop
+                  fingerprint: SHA256:9f0b6c...
+              schema:
+                $ref: "#/components/schemas/listUserSshKeys_200_response"
+          description: SSH keys.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+      summary: List a user's SSH keys
+      tags:
+      - Provisioning discovery
+    post:
+      description: "Validates, fingerprints and stores the key (deduped per user).\
+        \ Returns id/name/fingerprint only, never the key body."
+      operationId: addUserSshKey
+      parameters:
+      - $ref: "#/components/parameters/UserId"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/addUserSshKey_request"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Added.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+      summary: Add an SSH key to a user
+      tags:
+      - Users
+  /hosts/{hostId}/guests:
+    get:
+      description: |
+        Guest list from the latest inventory snapshot (DB-backed, no live PVE call), filterable by `node`, `type`, and `status`. Paginated.
+      operationId: listGuests
+      parameters:
+      - $ref: "#/components/parameters/HostId"
+      - $ref: "#/components/parameters/NodeQuery"
+      - description: Filter by guest type.
+        explode: true
+        in: query
+        name: type
+        required: false
+        schema:
+          enum:
+          - qemu
+          - lxc
+          type: string
+        style: form
+      - description: "Filter by guest status, for example running or stopped."
+        explode: true
+        in: query
+        name: status
+        required: false
+        schema:
+          type: string
+        style: form
+      - $ref: "#/components/parameters/Page"
+      - $ref: "#/components/parameters/PerPage"
+      responses:
+        "200":
+          content:
+            application/json:
+              example:
+                success: true
+                error: null
+                data:
+                - host_id: 1
+                  host: Test
+                  node: pve1
+                  vmid: 105
+                  name: web-01
+                  type: qemu
+                  status: running
+                  os: l26
+                  ip: 10.10.0.5
+                  cores: 2
+                  mem: 2147483648
+                  storage: 21474836480
+                  qemu_agent: true
+                meta:
+                  page: 1
+                  perPage: 50
+                  total: 9
+              schema:
+                $ref: "#/components/schemas/listGuests_200_response"
+          description: Guests.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+      summary: List guests
+      tags:
+      - Guests
+    post:
+      description: |
+        Creates a QEMU VM or an LXC container. Creation is asynchronous: this call validates the request, enqueues a provisioning job, and returns immediately with `{ queued: true, job_id, vmid }`. Poll `GET /hosts/{hostId}/jobs/{jobId}` until `data.status` is `done` or `failed`. The same executor that backs the web wizard runs the actual PVE work, so the guest's plan, template, IP source, and disks are applied exactly as they would be from the panel.
+
+        A plan (`plan_id`) fills and locks `cores`, `memory_mb`, and `disk_gb`; otherwise supply them explicitly (defaults 1 core, 512 MB, 8 GB). `password` is required unless at least one SSH key is present (via `ssh_keys[]` or an `owner_id` with stored keys). QEMU requires `os_template` as `tpl:<id>` from `GET /hosts/{hostId}/os-templates`. LXC requires exactly one template source, either `lxc_template_id` (from the `managed` list) or `os_template` as a raw volid (from the `available` list). `ip_source` is `dhcp` (default) or `zone:<id>` (from `GET /hosts/{hostId}/ip-zones`) to allocate a static IP. `extra_storage[]`, `extra_size[]`, and `extra_mount[]` are parallel arrays describing additional disks; LXC mounts must be absolute paths and default to `/mnt/disk<N>` when blank.
+      operationId: createGuest
+      parameters:
+      - $ref: "#/components/parameters/HostId"
+      requestBody:
+        content:
+          application/json:
+            examples:
+              qemuFromPlan:
+                summary: "QEMU VM from a plan, DHCP"
+                value:
+                  type: qemu
+                  node: pve1
+                  vmid: 105
+                  name: web-01
+                  plan_id: 2
+                  storage: local-lvm
+                  bridge: vmbr0
+                  os_template: tpl:7
+                  ip_source: dhcp
+                  password: s3cret-pw
+              lxcCustomWithZoneIp:
+                summary: LXC container with explicit specs and a static IP
+                value:
+                  type: lxc
+                  node: pve1
+                  vmid: 106
+                  name: db-01
+                  cores: 2
+                  memory_mb: 2048
+                  disk_gb: 20
+                  storage: local-lvm
+                  bridge: vmbr1
+                  lxc_template_id: 3
+                  ip_source: zone:3
+                  password: s3cret-pw
+                  owner_id: 4
+                  extra_storage:
+                  - local-lvm
+                  extra_size:
+                  - 50
+                  extra_mount:
+                  - /data
+              lxcDocker:
+                summary: LXC container ready for Docker (unprivileged + nesting +
+                  keyctl)
+                value:
+                  type: lxc
+                  node: pve1
+                  vmid: 107
+                  name: docker-01
+                  cores: 2
+                  memory_mb: 2048
+                  disk_gb: 20
+                  storage: local-lvm
+                  bridge: vmbr0
+                  lxc_template_id: 3
+                  password: s3cret-pw
+                  unprivileged: true
+                  nesting: true
+                  keyctl: true
+            schema:
+              $ref: "#/components/schemas/GuestCreateRequest"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              example:
+                success: true
+                error: null
+                data:
+                  queued: true
+                  job_id: 42
+                  vmid: 105
+              schema:
+                $ref: "#/components/schemas/createGuest_200_response"
+          description: Guest creation queued.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          content:
+            application/json:
+              example:
+                success: false
+                data: null
+                error: IP pool exhausted in the selected zone.
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: "Conflict, for example the selected IP zone's pool is exhausted."
+        "422":
+          $ref: "#/components/responses/ValidationError"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+      summary: Create a guest (async)
+      tags:
+      - Guests
+  /hosts/{hostId}/guests/{type}/{vmid}:
+    delete:
+      description: Deletes the guest. `node` is required as a query parameter.
+      operationId: deleteGuest
+      parameters:
+      - $ref: "#/components/parameters/HostId"
+      - $ref: "#/components/parameters/GuestType"
+      - $ref: "#/components/parameters/Vmid"
+      - description: The PVE node the guest currently lives on.
+        explode: true
+        in: query
+        name: node
+        required: true
+        schema:
+          type: string
+        style: form
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Guest deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+      summary: Delete a guest
+      tags:
+      - Guests
+    get:
+      description: "Guest detail from the latest inventory snapshot (DB-backed, no\
+        \ live PVE call)."
+      operationId: getGuest
+      parameters:
+      - $ref: "#/components/parameters/HostId"
+      - $ref: "#/components/parameters/GuestType"
+      - $ref: "#/components/parameters/Vmid"
+      responses:
+        "200":
+          content:
+            application/json:
+              example:
+                success: true
+                error: null
+                data:
+                  host_id: 1
+                  vmid: 105
+                  type: qemu
+                  node: pve1
+                  name: web-01
+                  status: running
+                  ip: 10.10.0.5
+                  cores: 2
+                  mem: 2147483648
+                  disk: 21474836480
+                  ostype: l26
+              schema:
+                $ref: "#/components/schemas/getGuest_200_response"
+          description: Guest detail.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+      summary: Get guest detail
+      tags:
+      - Guests
+  /hosts/{hostId}/guests/{type}/{vmid}/usage:
+    get:
+      description: |
+        Chart-ready time series built from the DB-backed guest metrics table, not a live PVE call. Points are `[epoch_ms, value]` pairs.
+      operationId: getGuestUsage
+      parameters:
+      - $ref: "#/components/parameters/HostId"
+      - $ref: "#/components/parameters/GuestType"
+      - $ref: "#/components/parameters/Vmid"
+      - description: The PVE node the guest currently lives on.
+        explode: true
+        in: query
+        name: node
+        required: true
+        schema:
+          type: string
+        style: form
+      - $ref: "#/components/parameters/Range"
+      - $ref: "#/components/parameters/Metrics"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/getNodeUsage_200_response"
+          description: Guest usage series.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+      summary: Guest CPU/mem/disk/net time series
+      tags:
+      - Guests
+  /hosts/{hostId}/guests/{type}/{vmid}/power:
+    post:
+      description: "Starts, stops, shuts down, reboots, suspends, or resumes the guest."
+      operationId: powerGuest
+      parameters:
+      - $ref: "#/components/parameters/HostId"
+      - $ref: "#/components/parameters/GuestType"
+      - $ref: "#/components/parameters/Vmid"
+      requestBody:
+        content:
+          application/json:
+            example:
+              node: pve1
+              action: start
+            schema:
+              $ref: "#/components/schemas/powerGuest_request"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Power action accepted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+      summary: Power action
+      tags:
+      - Guests
+  /hosts/{hostId}/guests/{type}/{vmid}/reinstall:
+    post:
+      description: |
+        Deletes and recreates the guest, keeping its vmid and specs, with a fresh OS. For QEMU, `os_template` must be `tpl:<id>` from `GET /hosts/{hostId}/os-templates`. For LXC, `os_template` is a raw `vztmpl` volid. `password` is required unless at least one SSH key is present via `ssh_keys[]`. Asynchronous, same job/poll pattern as create.
+      operationId: reinstallGuest
+      parameters:
+      - $ref: "#/components/parameters/HostId"
+      - $ref: "#/components/parameters/GuestType"
+      - $ref: "#/components/parameters/Vmid"
+      requestBody:
+        content:
+          application/json:
+            example:
+              node: pve1
+              os_template: tpl:9
+              password: n3w-s3cret
+            schema:
+              $ref: "#/components/schemas/reinstallGuest_request"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/createGuest_200_response"
+          description: Reinstall queued.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+      summary: Reinstall a guest (async)
+      tags:
+      - Guests
+  /hosts/{hostId}/guests/{type}/{vmid}/password:
+    post:
+      description: |
+        Sets a new password for the guest's login user, minimum 5 characters. By default (async provisioning enabled) the work is queued and the response is `{queued, job_id}` — poll GET /hosts/{hostId}/jobs/{jobId} for the outcome. When async provisioning is off the change runs synchronously and the response is `{changed: true}`.
+      operationId: setGuestPassword
+      parameters:
+      - $ref: "#/components/parameters/HostId"
+      - $ref: "#/components/parameters/GuestType"
+      - $ref: "#/components/parameters/Vmid"
+      requestBody:
+        content:
+          application/json:
+            example:
+              node: pve1
+              password: n3w-s3cret
+              username: root
+            schema:
+              $ref: "#/components/schemas/setGuestPassword_request"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              example:
+                success: true
+                error: null
+                data:
+                  queued: true
+                  job_id: 42
+              schema:
+                $ref: "#/components/schemas/setGuestPassword_200_response"
+          description: |
+            Queued (default) or, when async provisioning is disabled, changed synchronously.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+      summary: Reset the guest's root password
+      tags:
+      - Guests
+  /hosts/{hostId}/guests/{type}/{vmid}/ipconfig:
+    post:
+      description: |
+        Sets a static or DHCP `ipconfig` on the guest's primary NIC. Reboot the guest to apply the change.
+      operationId: setGuestIpconfig
+      parameters:
+      - $ref: "#/components/parameters/HostId"
+      - $ref: "#/components/parameters/GuestType"
+      - $ref: "#/components/parameters/Vmid"
+      requestBody:
+        content:
+          application/json:
+            example:
+              node: pve1
+              ipconfig: "ip=10.10.0.5/24,gw=10.10.0.1"
+              bridge: vmbr1
+            schema:
+              $ref: "#/components/schemas/setGuestIpconfig_request"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              example:
+                success: true
+                error: null
+                data:
+                  note: Reboot the guest to apply.
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: IP configuration applied (pending reboot).
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+      summary: Set the guest's network configuration
+      tags:
+      - Guests
+  /hosts/{hostId}/jobs/{jobId}:
+    get:
+      description: |
+        Poll this to track a create, reinstall, delete, or power job enqueued when `provision.async` is enabled. `status` transitions `queued` to `running` to a terminal state, either `done` or `failed`. On failure, `error` carries the reason.
+      operationId: getProvisioningJob
+      parameters:
+      - $ref: "#/components/parameters/HostId"
+      - explode: false
+        in: path
+        name: jobId
+        required: true
+        schema:
+          type: integer
+        style: simple
+      responses:
+        "200":
+          content:
+            application/json:
+              example:
+                success: true
+                error: null
+                data:
+                  id: 42
+                  kind: create
+                  type: qemu
+                  vmid: 105
+                  node: pve1
+                  status: done
+                  error: ""
+                  attempts: 1
+                  created_at: 2026-07-14 10:00:00
+                  started_at: 2026-07-14 10:00:01
+                  finished_at: 2026-07-14 10:00:42
+              schema:
+                $ref: "#/components/schemas/getProvisioningJob_200_response"
+          description: Job status.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+      summary: Get an async provisioning job's status
+      tags:
+      - Jobs & tasks
+  /hosts/{hostId}/tasks/{node}/{upid}:
+    get:
+      description: |
+        A live PVE task status lookup by UPID, for tracking the underlying Proxmox task directly (as opposed to the panel's own provisioning job).
+      operationId: getPveTask
+      parameters:
+      - $ref: "#/components/parameters/HostId"
+      - $ref: "#/components/parameters/NodeName"
+      - description: "The PVE task UPID, URL-encoded."
+        explode: false
+        in: path
+        name: upid
+        required: true
+        schema:
+          type: string
+        style: simple
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Task status.
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Invalid task id.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+      summary: Get a live PVE task's status
+      tags:
+      - Jobs & tasks
+  /users:
+    get:
+      description: Lists customer accounts (never includes secrets). Requires an admin-capable
+        token.
+      operationId: listUsers
+      responses:
+        "200":
+          content:
+            application/json:
+              example:
+                success: true
+                error: null
+                data:
+                - id: 4
+                  username: alice
+                  email: alice@example.com
+                  external_id: null
+                  is_active: 1
+                  guests: 2
+              schema:
+                $ref: "#/components/schemas/listUsers_200_response"
+          description: Customer users.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+      summary: List customer users
+      tags:
+      - Users
+    post:
+      description: |
+        Creates a customer account with a generated password, returned once in the response. Enqueues a welcome email.
+      operationId: createUser
+      requestBody:
+        content:
+          application/json:
+            example:
+              email: alice@example.com
+              username: alice
+              user_id: ext-1001
+            schema:
+              $ref: "#/components/schemas/createUser_request"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              example:
+                success: true
+                error: null
+                data:
+                  id: 4
+                  username: alice
+                  email: alice@example.com
+                  external_id: ext-1001
+                  password: Xk29-generated-pw
+              schema:
+                $ref: "#/components/schemas/createUser_200_response"
+          description: User created.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+      summary: Create a customer user
+      tags:
+      - Users
+  /users/{userId}:
+    delete:
+      description: Deletes the customer account and its guest ownership assignments.
+      operationId: deleteUser
+      parameters:
+      - $ref: "#/components/parameters/UserId"
+      responses:
+        "200":
+          content:
+            application/json:
+              example:
+                success: true
+                error: null
+                data:
+                  deleted: 4
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: User deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+      summary: Delete a customer user
+      tags:
+      - Users
+  /users/{userId}/reset-password:
+    post:
+      description: Generates a new password for the customer and enqueues a notification
+        email.
+      operationId: resetUserPassword
+      parameters:
+      - $ref: "#/components/parameters/UserId"
+      responses:
+        "200":
+          content:
+            application/json:
+              example:
+                success: true
+                error: null
+                data:
+                  id: 4
+                  password: Yk91-new-pw
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Password reset.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+      summary: Reset a customer's password
+      tags:
+      - Users
+  /users/{userId}/guests:
+    delete:
+      description: Removes the current owner from a guest.
+      operationId: unassignUserGuest
+      parameters:
+      - $ref: "#/components/parameters/UserId"
+      requestBody:
+        content:
+          application/json:
+            example:
+              host_id: 1
+              type: qemu
+              vmid: 105
+            schema:
+              $ref: "#/components/schemas/assignUserGuest_request"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              example:
+                success: true
+                error: null
+                data:
+                  unassigned: true
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Guest unassigned.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+      summary: Unassign guest ownership
+      tags:
+      - Users
+    post:
+      description: Assigns ownership of a guest to a customer. One owner per guest.
+      operationId: assignUserGuest
+      parameters:
+      - $ref: "#/components/parameters/UserId"
+      requestBody:
+        content:
+          application/json:
+            example:
+              host_id: 1
+              type: qemu
+              vmid: 105
+            schema:
+              $ref: "#/components/schemas/assignUserGuest_request"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              example:
+                success: true
+                error: null
+                data:
+                  user_id: 4
+                  host_id: 1
+                  type: qemu
+                  vmid: 105
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Guest assigned.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+      summary: Assign guest ownership
+      tags:
+      - Users
+  /hosts/{hostId}/guests/{type}/{vmid}/snapshots:
+    get:
+      description: "Live PVE read of a guest's snapshots, newest first."
+      operationId: listSnapshots
+      parameters:
+      - $ref: "#/components/parameters/HostId"
+      - $ref: "#/components/parameters/GuestType"
+      - $ref: "#/components/parameters/Vmid"
+      - $ref: "#/components/parameters/NodeQuery"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Snapshots.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+      summary: List guest snapshots
+      tags:
+      - Guests
+    post:
+      description: Creates a snapshot. QEMU guests may include RAM state via `vmstate`.
+      operationId: createSnapshot
+      parameters:
+      - $ref: "#/components/parameters/HostId"
+      - $ref: "#/components/parameters/GuestType"
+      - $ref: "#/components/parameters/Vmid"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/createSnapshot_request"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Snapshot task started (returns a PVE UPID).
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+      summary: Create a snapshot
+      tags:
+      - Guests
+  /hosts/{hostId}/guests/{type}/{vmid}/snapshots/{name}/rollback:
+    post:
+      description: Reverts the guest to a snapshot. Stop the guest first unless the
+        snapshot has a saved RAM state.
+      operationId: rollbackSnapshot
+      parameters:
+      - $ref: "#/components/parameters/HostId"
+      - $ref: "#/components/parameters/GuestType"
+      - $ref: "#/components/parameters/Vmid"
+      - explode: false
+        in: path
+        name: name
+        required: true
+        schema:
+          type: string
+        style: simple
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/rollbackSnapshot_request"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Rollback task started.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+      summary: Roll back to a snapshot
+      tags:
+      - Guests
+  /hosts/{hostId}/guests/{type}/{vmid}/snapshots/{name}:
+    delete:
+      operationId: deleteSnapshot
+      parameters:
+      - $ref: "#/components/parameters/HostId"
+      - $ref: "#/components/parameters/GuestType"
+      - $ref: "#/components/parameters/Vmid"
+      - explode: false
+        in: path
+        name: name
+        required: true
+        schema:
+          type: string
+        style: simple
+      - $ref: "#/components/parameters/NodeQuery"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Delete task started.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+      summary: Delete a snapshot
+      tags:
+      - Guests
+  /hosts/{hostId}/guests/{type}/{vmid}/resize:
+    post:
+      description: |
+        Change CPU cores and/or memory (MB), and/or grow a disk. Provide any of `cores`, `memory_mb`, or `disk` + `size`. Cores/memory apply on the next reboot; disk grow is immediate and grow-only (shrinking is rejected).
+      operationId: resizeGuest
+      parameters:
+      - $ref: "#/components/parameters/HostId"
+      - $ref: "#/components/parameters/GuestType"
+      - $ref: "#/components/parameters/Vmid"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/resizeGuest_request"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Resized.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+      summary: "Resize cores, memory, and/or a disk"
+      tags:
+      - Guests
+  /hosts/{hostId}/guests/{type}/{vmid}/ipfilter:
+    get:
+      description: "Whether the per-guest anti-spoof IP filter is on, plus its allow-list\
+        \ and the guest's assigned CIDRs."
+      operationId: getGuestIpFilter
+      parameters:
+      - $ref: "#/components/parameters/HostId"
+      - $ref: "#/components/parameters/GuestType"
+      - $ref: "#/components/parameters/Vmid"
+      - $ref: "#/components/parameters/NodeQuery"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Filter status and allow-list.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+      summary: Anti-spoof IP filter status
+      tags:
+      - Guests
+    post:
+      description: Enabling requires the guest to already hold an assigned IP; the
+        allow-list is the union of every IP assigned to the guest.
+      operationId: setGuestIpFilter
+      parameters:
+      - $ref: "#/components/parameters/HostId"
+      - $ref: "#/components/parameters/GuestType"
+      - $ref: "#/components/parameters/Vmid"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/setGuestIpFilter_request"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Toggled.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+      summary: Toggle the anti-spoof IP filter
+      tags:
+      - Guests
+  /hosts/{hostId}/guests/{type}/{vmid}/ips:
+    delete:
+      operationId: unassignGuestIp
+      parameters:
+      - $ref: "#/components/parameters/HostId"
+      - $ref: "#/components/parameters/GuestType"
+      - $ref: "#/components/parameters/Vmid"
+      - explode: true
+        in: query
+        name: ip_id
+        required: true
+        schema:
+          type: integer
+        style: form
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Unassigned.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+      summary: Unassign an IP from the guest
+      tags:
+      - Guests
+    get:
+      description: Every IP assigned to the guest (its primary plus any customer-pool
+        IPs) and the resulting CIDR set.
+      operationId: listGuestIps
+      parameters:
+      - $ref: "#/components/parameters/HostId"
+      - $ref: "#/components/parameters/GuestType"
+      - $ref: "#/components/parameters/Vmid"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Assigned IPs.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+      summary: List the guest's assigned IPs
+      tags:
+      - Guests
+    post:
+      description: Binds an unassigned IP address row (`ip_id`) to the guest and re-syncs
+        the anti-spoof allow-list. The IP must belong to the same host.
+      operationId: assignGuestIp
+      parameters:
+      - $ref: "#/components/parameters/HostId"
+      - $ref: "#/components/parameters/GuestType"
+      - $ref: "#/components/parameters/Vmid"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/assignGuestIp_request"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Assigned (reboot to apply).
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Already assigned.
+        "422":
+          $ref: "#/components/responses/ValidationError"
+      summary: Assign an IP to the guest
+      tags:
+      - Guests
+  /hosts/{hostId}/guests/{type}/{vmid}/events:
+    get:
+      description: "The DB-backed per-guest activity log, newest first. Paginated."
+      operationId: listGuestEvents
+      parameters:
+      - $ref: "#/components/parameters/HostId"
+      - $ref: "#/components/parameters/GuestType"
+      - $ref: "#/components/parameters/Vmid"
+      - $ref: "#/components/parameters/Page"
+      - $ref: "#/components/parameters/PerPage"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Events.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+      summary: Guest activity log
+      tags:
+      - Guests
+  /hosts/{hostId}/guests/{type}/{vmid}/firewall/rules:
+    get:
+      operationId: listGuestFirewallRules
+      parameters:
+      - $ref: "#/components/parameters/HostId"
+      - $ref: "#/components/parameters/GuestType"
+      - $ref: "#/components/parameters/Vmid"
+      - $ref: "#/components/parameters/NodeQuery"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Rules.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+      summary: List per-guest firewall rules
+      tags:
+      - Firewall
+    post:
+      description: Persists a rule and reconciles it to the guest's PVE firewall (best-effort).
+      operationId: createGuestFirewallRule
+      parameters:
+      - $ref: "#/components/parameters/HostId"
+      - $ref: "#/components/parameters/GuestType"
+      - $ref: "#/components/parameters/Vmid"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/createGuestFirewallRule_request"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Created.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+      summary: Add a per-guest firewall rule
+      tags:
+      - Firewall
+  /hosts/{hostId}/guests/{type}/{vmid}/firewall/rules/{ruleId}:
+    delete:
+      operationId: deleteGuestFirewallRule
+      parameters:
+      - $ref: "#/components/parameters/HostId"
+      - $ref: "#/components/parameters/GuestType"
+      - $ref: "#/components/parameters/Vmid"
+      - explode: false
+        in: path
+        name: ruleId
+        required: true
+        schema:
+          type: integer
+        style: simple
+      - $ref: "#/components/parameters/NodeQuery"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+      summary: Delete a per-guest firewall rule
+      tags:
+      - Firewall
+  /hosts/{hostId}/guests/{type}/{vmid}/firewall/options:
+    get:
+      operationId: getGuestFirewallOptions
+      parameters:
+      - $ref: "#/components/parameters/HostId"
+      - $ref: "#/components/parameters/GuestType"
+      - $ref: "#/components/parameters/Vmid"
+      - $ref: "#/components/parameters/NodeQuery"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Options.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+      summary: Get per-guest firewall options
+      tags:
+      - Firewall
+    post:
+      operationId: setGuestFirewallOptions
+      parameters:
+      - $ref: "#/components/parameters/HostId"
+      - $ref: "#/components/parameters/GuestType"
+      - $ref: "#/components/parameters/Vmid"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/setGuestFirewallOptions_request"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Saved.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+      summary: Set per-guest firewall options
+      tags:
+      - Firewall
+  /hosts/{hostId}/nat:
+    get:
+      operationId: getNat
+      parameters:
+      - $ref: "#/components/parameters/HostId"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: NAT config.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+      summary: Get NAT settings and port-forwards
+      tags:
+      - Networking
+    post:
+      operationId: setNatSettings
+      parameters:
+      - $ref: "#/components/parameters/HostId"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/setNatSettings_request"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Saved.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+      summary: Set NAT settings
+      tags:
+      - Networking
+  /hosts/{hostId}/nat/port-forwards:
+    post:
+      description: Adds a DNAT port-forward. Validated fail-closed (dest IP must be
+        inside the private CIDR).
+      operationId: createPortForward
+      parameters:
+      - $ref: "#/components/parameters/HostId"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/createPortForward_request"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Created.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Duplicate public port.
+        "422":
+          $ref: "#/components/responses/ValidationError"
+      summary: Add a port-forward
+      tags:
+      - Networking
+  /hosts/{hostId}/nat/port-forwards/{pfId}:
+    delete:
+      operationId: deletePortForward
+      parameters:
+      - $ref: "#/components/parameters/HostId"
+      - explode: false
+        in: path
+        name: pfId
+        required: true
+        schema:
+          type: integer
+        style: simple
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+      summary: Delete a port-forward
+      tags:
+      - Networking
+  /hosts/{hostId}/nat/apply:
+    post:
+      description: Enqueues the constrained apply_nat agent job that writes the host's
+        NAT rules from validated templates.
+      operationId: applyNat
+      parameters:
+      - $ref: "#/components/parameters/HostId"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Applied/queued.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+      summary: Apply NAT
+      tags:
+      - Networking
+  /hosts/{hostId}:
+    delete:
+      description: Full DB purge of the host and all its per-host data. The on-host
+        agent/storage wipe stays a panel action.
+      operationId: deleteHost
+      parameters:
+      - $ref: "#/components/parameters/HostId"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+      summary: Delete a host
+      tags:
+      - Hosts & nodes
+    post:
+      description: An empty or absent password leaves the stored one unchanged.
+      operationId: updateHost
+      parameters:
+      - $ref: "#/components/parameters/HostId"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/updateHost_request"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Updated.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+      summary: Update a host
+      tags:
+      - Hosts & nodes
+  /hosts/{hostId}/provision-image-storage:
+    post:
+      description: Enqueues the agent job that ensures the managed nexovirt-images
+        storage on the node. Requires an active agent.
+      operationId: provisionImageStorage
+      parameters:
+      - $ref: "#/components/parameters/HostId"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Provisioned.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+      summary: Provision the nexovirt-images storage
+      tags:
+      - Hosts & nodes
+  /users/{userId}/ssh-keys/{keyId}:
+    delete:
+      operationId: deleteUserSshKey
+      parameters:
+      - $ref: "#/components/parameters/UserId"
+      - explode: false
+        in: path
+        name: keyId
+        required: true
+        schema:
+          type: integer
+        style: simple
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+      summary: Delete one of a user's SSH keys
+      tags:
+      - Users
+  /users/{userId}/ips:
+    get:
+      description: "Every IP owned by the customer (assigned and free), enriched with\
+        \ zone name and family."
+      operationId: listUserIps
+      parameters:
+      - $ref: "#/components/parameters/UserId"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Owned IPs.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+      summary: List a customer's owned IP pool
+      tags:
+      - Users
+    post:
+      description: |
+        Grant IPs into a customer's pool. `mode=zone` (default) reserves the next `count` free addresses from `zone_id`; `mode=specific` grants the given `ids[]` from `zone_id`.
+      operationId: grantUserIps
+      parameters:
+      - $ref: "#/components/parameters/UserId"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/grantUserIps_request"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Granted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+      summary: Grant IPs to a customer's pool
+      tags:
+      - Users
+  /ip-addresses/{ipId}:
+    delete:
+      description: Only an unassigned owned IP can be revoked.
+      operationId: revokeIp
+      parameters:
+      - explode: false
+        in: path
+        name: ipId
+        required: true
+        schema:
+          type: integer
+        style: simple
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Revoked.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+      summary: Revoke an owned IP back to the admin pool
+      tags:
+      - Users
+  /alerts:
+    get:
+      description: "Alert instances, newest first, filterable by status and severity.\
+        \ Paginated."
+      operationId: listAlerts
+      parameters:
+      - explode: true
+        in: query
+        name: status
+        required: false
+        schema:
+          enum:
+          - active
+          - acknowledged
+          - resolved
+          type: string
+        style: form
+      - explode: true
+        in: query
+        name: severity
+        required: false
+        schema:
+          enum:
+          - info
+          - warning
+          - critical
+          type: string
+        style: form
+      - $ref: "#/components/parameters/Page"
+      - $ref: "#/components/parameters/PerPage"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Alerts.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+      summary: List alerts
+      tags:
+      - Alerts
+  /alerts/{alertId}/ack:
+    post:
+      operationId: ackAlert
+      parameters:
+      - explode: false
+        in: path
+        name: alertId
+        required: true
+        schema:
+          type: integer
+        style: simple
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Acknowledged.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+      summary: Acknowledge an alert
+      tags:
+      - Alerts
+  /alerts/{alertId}/resolve:
+    post:
+      operationId: resolveAlert
+      parameters:
+      - explode: false
+        in: path
+        name: alertId
+        required: true
+        schema:
+          type: integer
+        style: simple
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Resolved.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+      summary: Resolve an alert
+      tags:
+      - Alerts
+  /alert-rules:
+    get:
+      operationId: listAlertRules
+      parameters:
+      - $ref: "#/components/parameters/Page"
+      - $ref: "#/components/parameters/PerPage"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Rules.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+      summary: List alert rules
+      tags:
+      - Alerts
+    post:
+      operationId: createAlertRule
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/createAlertRule_request"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Created.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+      summary: Create an alert rule
+      tags:
+      - Alerts
+  /alert-rules/{ruleId}:
+    delete:
+      operationId: deleteAlertRule
+      parameters:
+      - explode: false
+        in: path
+        name: ruleId
+        required: true
+        schema:
+          type: integer
+        style: simple
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+      summary: Delete an alert rule
+      tags:
+      - Alerts
+    post:
+      operationId: updateAlertRule
+      parameters:
+      - explode: false
+        in: path
+        name: ruleId
+        required: true
+        schema:
+          type: integer
+        style: simple
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/createAlertRule_request"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Updated.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+      summary: Update an alert rule
+      tags:
+      - Alerts
+  /resellers:
+    get:
+      description: Paginated list of `role=reseller` accounts. Never includes secrets.
+        Enterprise-only.
+      operationId: listResellers
+      parameters:
+      - $ref: "#/components/parameters/Page"
+      - $ref: "#/components/parameters/PerPage"
+      responses:
+        "200":
+          content:
+            application/json:
+              example:
+                success: true
+                error: null
+                data:
+                - id: 9
+                  username: acme-hosting
+                  email: ops@acme.example
+                  is_active: 1
+                  customers: 12
+                  created_at: 2026-07-01 09:00:00
+              schema:
+                $ref: "#/components/schemas/listResellers_200_response"
+          description: Resellers.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+      summary: List resellers
+      tags:
+      - Resellers (admin)
+    post:
+      description: "Creates a `role=reseller` account with a generated password, returned\
+        \ once. Enterprise-only."
+      operationId: createReseller
+      requestBody:
+        content:
+          application/json:
+            example:
+              username: acme-hosting
+              email: ops@acme.example
+            schema:
+              $ref: "#/components/schemas/createReseller_request"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              example:
+                success: true
+                error: null
+                data:
+                  id: 9
+                  username: acme-hosting
+                  email: ops@acme.example
+                  password: Xk29-generated-pw
+              schema:
+                $ref: "#/components/schemas/createReseller_200_response"
+          description: Reseller created.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+      summary: Create a reseller
+      tags:
+      - Resellers (admin)
+  /resellers/{resellerId}:
+    delete:
+      description: Refuses (`422`) while the reseller still has customers assigned.
+        Enterprise-only.
+      operationId: deleteReseller
+      parameters:
+      - $ref: "#/components/parameters/ResellerId"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+      summary: Delete a reseller
+      tags:
+      - Resellers (admin)
+    get:
+      description: "Detail plus assigned nodes, assigned IP zones, quota plan id,\
+        \ and current usage. Enterprise-only."
+      operationId: getReseller
+      parameters:
+      - $ref: "#/components/parameters/ResellerId"
+      responses:
+        "200":
+          content:
+            application/json:
+              example:
+                success: true
+                error: null
+                data:
+                  id: 9
+                  username: acme-hosting
+                  email: ops@acme.example
+                  is_active: 1
+                  reseller_plan_id: 2
+                  created_at: 2026-07-01 09:00:00
+                  assigned_nodes:
+                  - host_id: 1
+                    node: pve1
+                  assigned_zones:
+                  - id: 3
+                    name: Public v4
+                    cidr: 203.0.113.0/24
+                  usage:
+                    customers: 12
+                    guests: 34
+                    cores: 40
+                    memory_mb: 65536
+                    disk_gb: 800
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Reseller detail.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+      summary: Get a reseller
+      tags:
+      - Resellers (admin)
+    post:
+      description: "Updates username, email, and active status. Enterprise-only."
+      operationId: updateReseller
+      parameters:
+      - $ref: "#/components/parameters/ResellerId"
+      requestBody:
+        content:
+          application/json:
+            example:
+              username: acme-hosting
+              email: ops@acme.example
+              is_active: true
+            schema:
+              $ref: "#/components/schemas/updateReseller_request"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Updated.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+      summary: Update a reseller
+      tags:
+      - Resellers (admin)
+  /resellers/{resellerId}/reset-password:
+    post:
+      description: "Generates a new password, returned once. Enterprise-only."
+      operationId: resetResellerPassword
+      parameters:
+      - $ref: "#/components/parameters/ResellerId"
+      responses:
+        "200":
+          content:
+            application/json:
+              example:
+                success: true
+                error: null
+                data:
+                  id: 9
+                  password: Yk91-new-pw
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Password reset.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+      summary: Reset a reseller's password
+      tags:
+      - Resellers (admin)
+  /resellers/{resellerId}/customers:
+    delete:
+      operationId: unassignResellerCustomer
+      parameters:
+      - $ref: "#/components/parameters/ResellerId"
+      requestBody:
+        content:
+          application/json:
+            example:
+              customer_id: 4
+            schema:
+              $ref: "#/components/schemas/assignResellerCustomer_request"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              example:
+                success: true
+                error: null
+                data:
+                  unassigned: 4
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Unlinked.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+      summary: Unlink a customer from a reseller
+      tags:
+      - Resellers (admin)
+    post:
+      description: Quota-gated (`422` past the reseller's plan cap). Enterprise-only.
+      operationId: assignResellerCustomer
+      parameters:
+      - $ref: "#/components/parameters/ResellerId"
+      requestBody:
+        content:
+          application/json:
+            example:
+              customer_id: 4
+            schema:
+              $ref: "#/components/schemas/assignResellerCustomer_request"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              example:
+                success: true
+                error: null
+                data:
+                  reseller_id: 9
+                  customer_id: 4
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Linked.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+      summary: Link a customer to a reseller
+      tags:
+      - Resellers (admin)
+  /resellers/{resellerId}/plan:
+    delete:
+      operationId: unassignResellerPlan
+      parameters:
+      - $ref: "#/components/parameters/ResellerId"
+      responses:
+        "200":
+          content:
+            application/json:
+              example:
+                success: true
+                error: null
+                data:
+                  reseller_id: 9
+                  reseller_plan_id: null
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Cleared.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+      summary: Clear a reseller's quota plan
+      tags:
+      - Resellers (admin)
+    post:
+      operationId: assignResellerPlan
+      parameters:
+      - $ref: "#/components/parameters/ResellerId"
+      requestBody:
+        content:
+          application/json:
+            example:
+              reseller_plan_id: 2
+            schema:
+              $ref: "#/components/schemas/assignResellerPlan_request"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              example:
+                success: true
+                error: null
+                data:
+                  reseller_id: 9
+                  reseller_plan_id: 2
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Assigned.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+      summary: Assign a reseller quota plan
+      tags:
+      - Resellers (admin)
+  /resellers/{resellerId}/nodes:
+    delete:
+      operationId: unassignResellerNode
+      parameters:
+      - $ref: "#/components/parameters/ResellerId"
+      requestBody:
+        content:
+          application/json:
+            example:
+              host_id: 1
+              node: pve1
+            schema:
+              $ref: "#/components/schemas/assignResellerNode_request"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              example:
+                success: true
+                error: null
+                data:
+                  reseller_id: 9
+                  host_id: 1
+                  node: pve1
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Revoked.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+      summary: Revoke node access
+      tags:
+      - Resellers (admin)
+    post:
+      description: "Grants the reseller access to a (host, node) pair for placement\
+        \ and API guest creation."
+      operationId: assignResellerNode
+      parameters:
+      - $ref: "#/components/parameters/ResellerId"
+      requestBody:
+        content:
+          application/json:
+            example:
+              host_id: 1
+              node: pve1
+            schema:
+              $ref: "#/components/schemas/assignResellerNode_request"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              example:
+                success: true
+                error: null
+                data:
+                  reseller_id: 9
+                  host_id: 1
+                  node: pve1
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Granted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+      summary: Grant node access
+      tags:
+      - Resellers (admin)
+  /resellers/{resellerId}/zones:
+    delete:
+      operationId: unassignResellerZone
+      parameters:
+      - $ref: "#/components/parameters/ResellerId"
+      requestBody:
+        content:
+          application/json:
+            example:
+              ip_zone_id: 3
+            schema:
+              $ref: "#/components/schemas/assignResellerZone_request"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              example:
+                success: true
+                error: null
+                data:
+                  reseller_id: 9
+                  ip_zone_id: 3
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Revoked.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+      summary: Revoke IP-zone access
+      tags:
+      - Resellers (admin)
+    post:
+      operationId: assignResellerZone
+      parameters:
+      - $ref: "#/components/parameters/ResellerId"
+      requestBody:
+        content:
+          application/json:
+            example:
+              ip_zone_id: 3
+            schema:
+              $ref: "#/components/schemas/assignResellerZone_request"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              example:
+                success: true
+                error: null
+                data:
+                  reseller_id: 9
+                  ip_zone_id: 3
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Granted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+      summary: Grant IP-zone access
+      tags:
+      - Resellers (admin)
+  /reseller-plans:
+    get:
+      operationId: listResellerPlans
+      parameters:
+      - $ref: "#/components/parameters/Page"
+      - $ref: "#/components/parameters/PerPage"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/listResellerPlans_200_response"
+          description: Reseller plans.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+      summary: List reseller quota plans
+      tags:
+      - Resellers (admin)
+    post:
+      description: '`0` for any `max_*` cap means unlimited.'
+      operationId: createResellerPlan
+      requestBody:
+        content:
+          application/json:
+            example:
+              name: Standard
+              description: Up to 20 customers
+              max_customers: 20
+              max_guests: 60
+              max_cores: 80
+              max_memory_mb: 131072
+              max_disk_gb: 2000
+              is_active: true
+            schema:
+              $ref: "#/components/schemas/ResellerPlanInput"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/createResellerPlan_200_response"
+          description: Created.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+      summary: Create a reseller quota plan
+      tags:
+      - Resellers (admin)
+  /reseller-plans/{planId}:
+    delete:
+      description: Refuses (`422`) while a reseller still references the plan.
+      operationId: deleteResellerPlan
+      parameters:
+      - $ref: "#/components/parameters/ResellerPlanId"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+      summary: Delete a reseller quota plan
+      tags:
+      - Resellers (admin)
+    post:
+      operationId: updateResellerPlan
+      parameters:
+      - $ref: "#/components/parameters/ResellerPlanId"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResellerPlanInput"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/createResellerPlan_200_response"
+          description: Updated.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+      summary: Update a reseller quota plan
+      tags:
+      - Resellers (admin)
+  /ping:
+    get:
+      description: Verifies the reseller token and returns the calling reseller's
+        id. Useful for a quick connectivity/credential check.
+      operationId: resellerPing
+      responses:
+        "200":
+          content:
+            application/json:
+              example:
+                success: true
+                error: null
+                data:
+                  pong: true
+                  reseller_id: 7
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Token is valid.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+      security:
+      - resellerBearerAuth: []
+      summary: Auth probe
+      tags:
+      - "Reseller: Customers"
+    servers:
+    - url: "https://{host}/api/reseller"
+      variables:
+        host:
+          default: your-panel-host
+  /customers:
+    get:
+      operationId: listResellerCustomers
+      parameters:
+      - $ref: "#/components/parameters/Page"
+      - $ref: "#/components/parameters/PerPage"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/listResellerCustomers_200_response"
+          description: The calling reseller's customers only.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+      security:
+      - resellerBearerAuth: []
+      summary: List my customers
+      tags:
+      - "Reseller: Customers"
+    post:
+      description: Creates a customer under the calling reseller. Quota-gated (`422`
+        past the reseller's plan cap).
+      operationId: createResellerCustomer
+      requestBody:
+        content:
+          application/json:
+            example:
+              username: bob
+              email: bob@example.com
+            schema:
+              $ref: "#/components/schemas/createReseller_request"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/createReseller_200_response"
+          description: Created.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+      security:
+      - resellerBearerAuth: []
+      summary: Create a customer
+      tags:
+      - "Reseller: Customers"
+    servers:
+    - url: "https://{host}/api/reseller"
+      variables:
+        host:
+          default: your-panel-host
+  /customers/{customerId}:
+    delete:
+      description: Refuses (`422`) while the customer still owns guests.
+      operationId: deleteResellerCustomer
+      parameters:
+      - $ref: "#/components/parameters/CustomerId"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+      security:
+      - resellerBearerAuth: []
+      summary: Delete a customer
+      tags:
+      - "Reseller: Customers"
+    get:
+      description: '`404` if this customer does not belong to the calling reseller.'
+      operationId: getResellerCustomer
+      parameters:
+      - $ref: "#/components/parameters/CustomerId"
+      responses:
+        "200":
+          content:
+            application/json:
+              example:
+                success: true
+                error: null
+                data:
+                  id: 4
+                  username: bob
+                  email: bob@example.com
+                  is_active: 1
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Customer detail.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+      security:
+      - resellerBearerAuth: []
+      summary: Get a customer
+      tags:
+      - "Reseller: Customers"
+    patch:
+      operationId: updateResellerCustomer
+      parameters:
+      - $ref: "#/components/parameters/CustomerId"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/updateReseller_request"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Updated.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+      security:
+      - resellerBearerAuth: []
+      summary: Update a customer
+      tags:
+      - "Reseller: Customers"
+    post:
+      description: "Identical to `PATCH /customers/{customerId}`, for clients that\
+        \ cannot send PATCH."
+      operationId: updateResellerCustomerPost
+      parameters:
+      - $ref: "#/components/parameters/CustomerId"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/updateReseller_request"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Updated.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+      security:
+      - resellerBearerAuth: []
+      summary: Update a customer (POST alias)
+      tags:
+      - "Reseller: Customers"
+    servers:
+    - url: "https://{host}/api/reseller"
+      variables:
+        host:
+          default: your-panel-host
+  /customers/{customerId}/reset-password:
+    post:
+      operationId: resetResellerCustomerPassword
+      parameters:
+      - $ref: "#/components/parameters/CustomerId"
+      responses:
+        "200":
+          content:
+            application/json:
+              example:
+                success: true
+                error: null
+                data:
+                  id: 4
+                  password: Yk91-new-pw
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Password reset.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+      security:
+      - resellerBearerAuth: []
+      summary: Reset a customer's password
+      tags:
+      - "Reseller: Customers"
+    servers:
+    - url: "https://{host}/api/reseller"
+      variables:
+        host:
+          default: your-panel-host
+  /customers/{customerId}/ssh-keys:
+    get:
+      description: "id/name/fingerprint only, never the key body."
+      operationId: listResellerCustomerSshKeys
+      parameters:
+      - $ref: "#/components/parameters/CustomerId"
+      responses:
+        "200":
+          content:
+            application/json:
+              example:
+                success: true
+                error: null
+                data:
+                - id: 1
+                  name: laptop
+                  fingerprint: SHA256:abc...
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: SSH keys.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+      security:
+      - resellerBearerAuth: []
+      summary: List a customer's SSH keys
+      tags:
+      - "Reseller: SSH keys"
+    post:
+      operationId: addResellerCustomerSshKey
+      parameters:
+      - $ref: "#/components/parameters/CustomerId"
+      requestBody:
+        content:
+          application/json:
+            example:
+              name: laptop
+              public_key: ssh-ed25519 AAAA... bob@laptop
+            schema:
+              $ref: "#/components/schemas/addUserSshKey_request"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              example:
+                success: true
+                error: null
+                data:
+                  id: 1
+                  name: laptop
+                  fingerprint: SHA256:abc...
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Added.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+      security:
+      - resellerBearerAuth: []
+      summary: Add an SSH key
+      tags:
+      - "Reseller: SSH keys"
+    servers:
+    - url: "https://{host}/api/reseller"
+      variables:
+        host:
+          default: your-panel-host
+  /customers/{customerId}/ssh-keys/{keyId}:
+    delete:
+      operationId: deleteResellerCustomerSshKey
+      parameters:
+      - $ref: "#/components/parameters/CustomerId"
+      - $ref: "#/components/parameters/SshKeyId"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+      security:
+      - resellerBearerAuth: []
+      summary: Delete an SSH key
+      tags:
+      - "Reseller: SSH keys"
+    servers:
+    - url: "https://{host}/api/reseller"
+      variables:
+        host:
+          default: your-panel-host
+  /guests:
+    get:
+      description: "Guests owned by the calling reseller's own customers, across every\
+        \ node the reseller is assigned."
+      operationId: listResellerGuests
+      parameters:
+      - $ref: "#/components/parameters/NodeQuery"
+      - explode: true
+        in: query
+        name: type
+        required: false
+        schema:
+          enum:
+          - qemu
+          - lxc
+          type: string
+        style: form
+      - explode: true
+        in: query
+        name: status
+        required: false
+        schema:
+          type: string
+        style: form
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Guests.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+      security:
+      - resellerBearerAuth: []
+      summary: List my guests
+      tags:
+      - "Reseller: Guests"
+    post:
+      description: |
+        `owner_id` must be one of the calling reseller's own customers (`404` otherwise). `host_id`/`node` must be a (host, node) pair the reseller was granted; `plan_id` and any `ipv4_zone_id`/`ipv6_zone_id` must likewise belong to the reseller. Same shape as the admin `POST /hosts/{hostId}/guests` body, plus `owner_id`, `host_id`, and `node`.
+      operationId: createResellerGuest
+      requestBody:
+        content:
+          application/json:
+            example:
+              owner_id: 4
+              host_id: 1
+              node: pve1
+              type: lxc
+              vmid: 210
+              name: bob-web
+              storage: local-lvm
+              plan_id: 2
+              ip_source: dhcp
+            schema:
+              $ref: "#/components/schemas/createResellerGuest_request"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Create requested.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+      security:
+      - resellerBearerAuth: []
+      summary: Create a guest for one of my customers
+      tags:
+      - "Reseller: Guests"
+    servers:
+    - url: "https://{host}/api/reseller"
+      variables:
+        host:
+          default: your-panel-host
+  /guests/{hostId}/{type}/{vmid}:
+    delete:
+      operationId: deleteResellerGuest
+      parameters:
+      - $ref: "#/components/parameters/HostId"
+      - $ref: "#/components/parameters/GuestType"
+      - $ref: "#/components/parameters/Vmid"
+      - explode: true
+        in: query
+        name: node
+        required: true
+        schema:
+          type: string
+        style: form
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+      security:
+      - resellerBearerAuth: []
+      summary: Delete a guest
+      tags:
+      - "Reseller: Guests"
+    get:
+      description: '`404` unless owned by one of the calling reseller''s own customers.'
+      operationId: getResellerGuest
+      parameters:
+      - $ref: "#/components/parameters/HostId"
+      - $ref: "#/components/parameters/GuestType"
+      - $ref: "#/components/parameters/Vmid"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Guest detail.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+      security:
+      - resellerBearerAuth: []
+      summary: Get a guest
+      tags:
+      - "Reseller: Guests"
+    servers:
+    - url: "https://{host}/api/reseller"
+      variables:
+        host:
+          default: your-panel-host
+  /guests/{hostId}/{type}/{vmid}/power:
+    post:
+      operationId: powerResellerGuest
+      parameters:
+      - $ref: "#/components/parameters/HostId"
+      - $ref: "#/components/parameters/GuestType"
+      - $ref: "#/components/parameters/Vmid"
+      requestBody:
+        content:
+          application/json:
+            example:
+              node: pve1
+              action: reboot
+            schema:
+              $ref: "#/components/schemas/powerResellerGuest_request"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Action dispatched.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+      security:
+      - resellerBearerAuth: []
+      summary: Power action
+      tags:
+      - "Reseller: Guests"
+    servers:
+    - url: "https://{host}/api/reseller"
+      variables:
+        host:
+          default: your-panel-host
+  /guests/{hostId}/{type}/{vmid}/ip:
+    post:
+      description: |
+        `action=change` requires `ip` (must fall inside the target zone's range) and assigns it; `action=release` frees the guest's current IP for that family. The target zone (`zone_id`, or the guest's current single-stack zone if omitted) must be one the calling reseller was granted. Reboot the guest to apply.
+      operationId: changeResellerGuestIp
+      parameters:
+      - $ref: "#/components/parameters/HostId"
+      - $ref: "#/components/parameters/GuestType"
+      - $ref: "#/components/parameters/Vmid"
+      requestBody:
+        content:
+          application/json:
+            example:
+              node: pve1
+              action: change
+              zone_id: 3
+              ip: 203.0.113.42
+            schema:
+              $ref: "#/components/schemas/changeResellerGuestIp_request"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Applied.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+      security:
+      - resellerBearerAuth: []
+      summary: Change or release a guest's static IP
+      tags:
+      - "Reseller: Networking"
+    servers:
+    - url: "https://{host}/api/reseller"
+      variables:
+        host:
+          default: your-panel-host
+  /plans:
+    get:
+      description: The reseller's own plans plus any global plans. Read-only.
+      operationId: listResellerPlansAvailable
+      parameters:
+      - $ref: "#/components/parameters/Page"
+      - $ref: "#/components/parameters/PerPage"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Plans.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+      security:
+      - resellerBearerAuth: []
+      summary: List plans available to me
+      tags:
+      - "Reseller: Plans & usage"
+    servers:
+    - url: "https://{host}/api/reseller"
+      variables:
+        host:
+          default: your-panel-host
+  /usage:
+    get:
+      description: Per-customer usage breakdown plus the reseller's total usage and
+        quota plan. Read-only.
+      operationId: getResellerUsage
+      responses:
+        "200":
+          content:
+            application/json:
+              example:
+                success: true
+                error: null
+                data:
+                  customers:
+                  - id: 4
+                    username: bob
+                    guests: 3
+                    cores: 6
+                    memory_mb: 8192
+                    disk_gb: 120
+                  usage:
+                    customers: 12
+                    guests: 34
+                    cores: 40
+                    memory_mb: 65536
+                    disk_gb: 800
+                  plan:
+                    id: 2
+                    name: Standard
+                    max_customers: 20
+                    max_guests: 60
+                    max_cores: 80
+                    max_memory_mb: 131072
+                    max_disk_gb: 2000
+              schema:
+                $ref: "#/components/schemas/Envelope"
+          description: Usage.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+      security:
+      - resellerBearerAuth: []
+      summary: My usage
+      tags:
+      - "Reseller: Plans & usage"
+    servers:
+    - url: "https://{host}/api/reseller"
+      variables:
+        host:
+          default: your-panel-host
+components:
+  parameters:
+    HostId:
+      description: The panel's internal host id (from `GET /hosts`).
+      explode: false
+      in: path
+      name: hostId
+      required: true
+      schema:
+        type: integer
+      style: simple
+    UserId:
+      explode: false
+      in: path
+      name: userId
+      required: true
+      schema:
+        type: integer
+      style: simple
+    NodeName:
+      description: The PVE node name.
+      explode: false
+      in: path
+      name: node
+      required: true
+      schema:
+        type: string
+      style: simple
+    ResellerId:
+      description: The panel's internal user id of a `role=reseller` account.
+      explode: false
+      in: path
+      name: resellerId
+      required: true
+      schema:
+        type: integer
+      style: simple
+    ResellerPlanId:
+      description: A reseller quota-plan id.
+      explode: false
+      in: path
+      name: planId
+      required: true
+      schema:
+        type: integer
+      style: simple
+    CustomerId:
+      description: The panel's internal user id of one of the calling reseller's own
+        customers.
+      explode: false
+      in: path
+      name: customerId
+      required: true
+      schema:
+        type: integer
+      style: simple
+    SshKeyId:
+      description: An SSH key id belonging to the given customer.
+      explode: false
+      in: path
+      name: keyId
+      required: true
+      schema:
+        type: integer
+      style: simple
+    NodeQuery:
+      description: Restrict results to this PVE node (plus any datacenter-wide/shared
+        entries).
+      explode: true
+      in: query
+      name: node
+      required: false
+      schema:
+        type: string
+      style: form
+    GuestType:
+      description: Guest type.
+      explode: false
+      in: path
+      name: type
+      required: true
+      schema:
+        enum:
+        - qemu
+        - lxc
+        type: string
+      style: simple
+    Vmid:
+      description: The guest's VMID.
+      explode: false
+      in: path
+      name: vmid
+      required: true
+      schema:
+        type: integer
+      style: simple
+    Page:
+      description: "Page number, 1-based."
+      explode: true
+      in: query
+      name: page
+      required: false
+      schema:
+        default: 1
+        minimum: 1
+        type: integer
+      style: form
+    PerPage:
+      description: "Items per page, clamped to 1..200."
+      explode: true
+      in: query
+      name: perPage
+      required: false
+      schema:
+        default: 50
+        maximum: 200
+        minimum: 1
+        type: integer
+      style: form
+    Range:
+      description: Time window for the series.
+      explode: true
+      in: query
+      name: range
+      required: false
+      schema:
+        default: 30m
+        enum:
+        - 30m
+        - 3h
+        - 24h
+        type: string
+      style: form
+    Metrics:
+      description: "Comma-separated subset of metrics to return, for example \"cpu,mem\"\
+        . Defaults to all."
+      explode: true
+      in: query
+      name: metrics
+      required: false
+      schema:
+        type: string
+      style: form
+  responses:
+    Unauthorized:
+      content:
+        application/json:
+          example:
+            success: false
+            data: null
+            error: Invalid or missing API token.
+          schema:
+            $ref: "#/components/schemas/Envelope"
+      description: Missing or invalid bearer token.
+    Forbidden:
+      content:
+        application/json:
+          example:
+            success: false
+            data: null
+            error: This token is not permitted to access this host.
+          schema:
+            $ref: "#/components/schemas/Envelope"
+      description: "The token is not scoped to this host, or its IP allowlist rejected\
+        \ the caller."
+    NotFound:
+      content:
+        application/json:
+          example:
+            success: false
+            data: null
+            error: Host not found.
+          schema:
+            $ref: "#/components/schemas/Envelope"
+      description: "The host, guest, user, or job was not found."
+    ValidationError:
+      content:
+        application/json:
+          example:
+            success: false
+            data: null
+            error: Invalid node name.
+          schema:
+            $ref: "#/components/schemas/Envelope"
+      description: "The request failed validation, for example an invalid node name\
+        \ or missing field."
+    BadGateway:
+      content:
+        application/json:
+          example:
+            success: false
+            data: null
+            error: Could not reach the host.
+          schema:
+            $ref: "#/components/schemas/Envelope"
+      description: The underlying Proxmox VE call failed or the host was unreachable.
+  schemas:
+    Envelope:
+      example:
+        data: ""
+        success: true
+        meta:
+          total: 137
+          perPage: 50
+          page: 1
+        error: error
+      properties:
+        success:
+          type: boolean
+        data: {}
+        error:
+          description: "A human-readable error message, null on success."
+          nullable: true
+          type: string
+        meta:
+          $ref: "#/components/schemas/PaginationMeta"
+      required:
+      - data
+      - error
+      - success
+    PaginationMeta:
+      example:
+        total: 137
+        perPage: 50
+        page: 1
+      properties:
+        page:
+          example: 1
+          type: integer
+        perPage:
+          example: 50
+          type: integer
+        total:
+          example: 137
+          type: integer
+    Host:
+      example:
+        hostname: 188.40.137.121
+        port: 8006
+        name: Test
+        active: true
+        id: 1
+        user: root@pam
+      properties:
+        id:
+          example: 1
+          type: integer
+        name:
+          example: Test
+          type: string
+        hostname:
+          example: 188.40.137.121
+          type: string
+        port:
+          example: 8006
+          type: integer
+        user:
+          example: root@pam
+          type: string
+        active:
+          example: true
+          type: boolean
+    NodeSummary:
+      additionalProperties: {}
+      description: |
+        A live PVE node summary as returned by Proxmox's own `nodes` endpoint, passed through with minimal shaping.
+      example:
+        node: pve1
+        disk: 21474836480
+        mem: 4294967296
+        maxdisk: 107374182400
+        cpu: 0.03
+        maxcpu: 8
+        maxmem: 34359738368
+        status: online
+        uptime: 1234567
+      properties:
+        node:
+          example: pve1
+          type: string
+        status:
+          example: online
+        cpu:
+          example: 0.03
+        maxcpu:
+          example: 8
+        mem:
+          example: 4294967296
+        maxmem:
+          example: 34359738368
+        disk:
+          example: 21474836480
+        maxdisk:
+          example: 107374182400
+        uptime:
+          example: 1234567
+    NodeDetail:
+      additionalProperties: true
+      description: |
+        A live PVE node status object, passed through from Proxmox (CPU info, memory, root filesystem, load average, PVE version, and more). Field set varies by Proxmox VE version.
+      type: object
+    Storage:
+      example:
+        node: pve1
+        avail: 1
+        total: 0
+        used_pct: 24.0
+        active: true
+        id: local-lvm
+        used: 6
+        type: lvmthin
+        content: "images,rootdir"
+      properties:
+        id:
+          description: The PVE storage id.
+          example: local-lvm
+          type: string
+        node:
+          example: pve1
+          type: string
+        type:
+          example: lvmthin
+          type: string
+        total:
+          description: Bytes.
+          type: integer
+        used:
+          description: Bytes.
+          type: integer
+        avail:
+          description: Bytes.
+          type: integer
+        used_pct:
+          example: 24.0
+          type: number
+        content:
+          example: "images,rootdir"
+          type: string
+        active:
+          type: boolean
+    NetworkInterface:
+      example:
+        iface: vmbr0
+        node: pve1
+        role: WAN
+        active: true
+        cidr: 203.0.113.0/24
+        type: bridge
+        ports: eno1
+        gateway: 203.0.113.1
+      properties:
+        iface:
+          example: vmbr0
+          type: string
+        node:
+          example: pve1
+          type: string
+        type:
+          example: bridge
+          type: string
+        role:
+          enum:
+          - WAN
+          - Private
+          - Internal
+          - Other
+          type: string
+        cidr:
+          example: 203.0.113.0/24
+          type: string
+        gateway:
+          example: 203.0.113.1
+          type: string
+        ports:
+          example: eno1
+          type: string
+        active:
+          type: boolean
+    Plan:
+      example:
+        cores: 2
+        runtime_days: 6
+        name: Standard
+        description: description
+        memory_mb: 2048
+        traffic_limit_gb: 0
+        id: 2
+        snapshot_limit: 5
+        grace_days: 1
+        disk_gb: 20
+      properties:
+        id:
+          example: 2
+          type: integer
+        name:
+          example: Standard
+          type: string
+        description:
+          type: string
+        cores:
+          example: 2
+          type: integer
+        memory_mb:
+          example: 2048
+          type: integer
+        disk_gb:
+          example: 20
+          type: integer
+        traffic_limit_gb:
+          description: Monthly traffic limit. 0 means unlimited.
+          type: integer
+        runtime_days:
+          description: Expiry in days. 0 means unlimited.
+          type: integer
+        grace_days:
+          description: Grace period before auto-delete after expiry.
+          type: integer
+        snapshot_limit:
+          type: integer
+    OsTemplate:
+      example:
+        ref: tpl:7
+        ci_user: ubuntu
+        is_shipped: true
+        group_id: 0
+        group_name: General
+        name: Ubuntu 24.04
+        description: description
+        id: 7
+        ostype: l26
+      properties:
+        id:
+          example: 7
+          type: integer
+        ref:
+          description: The exact os_template value for a QEMU create.
+          example: tpl:7
+          type: string
+        name:
+          example: Ubuntu 24.04
+          type: string
+        description:
+          type: string
+        ostype:
+          example: l26
+          type: string
+        ci_user:
+          example: ubuntu
+          type: string
+        group_id:
+          type: integer
+        group_name:
+          example: General
+          type: string
+        is_shipped:
+          type: boolean
+    CtTemplateManaged:
+      example:
+        lxc_template_id: 3
+        unprivileged: true
+        group_id: 0
+        name: Debian 12
+        description: description
+        ostype: debian
+        arch: amd64
+        source: shipped
+      properties:
+        lxc_template_id:
+          example: 3
+          type: integer
+        name:
+          example: Debian 12
+          type: string
+        description:
+          type: string
+        ostype:
+          example: debian
+          type: string
+        arch:
+          example: amd64
+          type: string
+        unprivileged:
+          type: boolean
+        group_id:
+          type: integer
+        source:
+          example: shipped
+          type: string
+    CtTemplateAvailable:
+      example:
+        node: pve1
+        size: 6
+        format: tar.zst
+        volid: local:vztmpl/debian-12-standard_12.7-1_amd64.tar.zst
+      properties:
+        volid:
+          example: local:vztmpl/debian-12-standard_12.7-1_amd64.tar.zst
+          type: string
+        node:
+          example: pve1
+          type: string
+        format:
+          example: tar.zst
+          type: string
+        size:
+          description: Bytes.
+          type: integer
+    CtTemplates:
+      example:
+        managed:
+        - lxc_template_id: 3
+          unprivileged: true
+          group_id: 0
+          name: Debian 12
+          description: description
+          ostype: debian
+          arch: amd64
+          source: shipped
+        - lxc_template_id: 3
+          unprivileged: true
+          group_id: 0
+          name: Debian 12
+          description: description
+          ostype: debian
+          arch: amd64
+          source: shipped
+        available:
+        - node: pve1
+          size: 6
+          format: tar.zst
+          volid: local:vztmpl/debian-12-standard_12.7-1_amd64.tar.zst
+        - node: pve1
+          size: 6
+          format: tar.zst
+          volid: local:vztmpl/debian-12-standard_12.7-1_amd64.tar.zst
+      properties:
+        managed:
+          items:
+            $ref: "#/components/schemas/CtTemplateManaged"
+          type: array
+        available:
+          items:
+            $ref: "#/components/schemas/CtTemplateAvailable"
+          type: array
+    IpZone:
+      example:
+        ref: zone:3
+        is_active: true
+        vlan: vlan
+        name: Private LAN
+        cidr: 10.10.0.0/24
+        id: 3
+        bridge: vmbr1
+        family: ipv4
+        gateway: 10.10.0.1
+      properties:
+        id:
+          example: 3
+          type: integer
+        ref:
+          description: The exact ip_source value to allocate a static IP.
+          example: zone:3
+          type: string
+        name:
+          example: Private LAN
+          type: string
+        family:
+          enum:
+          - ipv4
+          - ipv6
+          type: string
+        bridge:
+          example: vmbr1
+          type: string
+        cidr:
+          example: 10.10.0.0/24
+          type: string
+        gateway:
+          example: 10.10.0.1
+          type: string
+        vlan:
+          type: string
+        is_active:
+          type: boolean
+    SshKey:
+      example:
+        name: laptop
+        fingerprint: SHA256:9f0b6c...
+        id: 5
+      properties:
+        id:
+          example: 5
+          type: integer
+        name:
+          example: laptop
+          type: string
+        fingerprint:
+          example: SHA256:9f0b6c...
+          type: string
+    GuestListItem:
+      example:
+        os: l26
+        vmid: 105
+        qemu_agent: true
+        ip: 10.10.0.5
+        storage: 6
+        type: qemu
+        host_id: 1
+        tags: prod;web
+        node: pve1
+        cores: 2
+        mem: 0
+        host: Test
+        name: web-01
+        status: running
+      properties:
+        host_id:
+          example: 1
+          type: integer
+        host:
+          example: Test
+          type: string
+        node:
+          example: pve1
+          type: string
+        vmid:
+          example: 105
+          type: integer
+        name:
+          example: web-01
+          type: string
+        type:
+          enum:
+          - qemu
+          - lxc
+          type: string
+        status:
+          example: running
+          type: string
+        os:
+          description: The PVE ostype.
+          example: l26
+          type: string
+        ip:
+          example: 10.10.0.5
+          type: string
+        cores:
+          example: 2
+          type: integer
+        mem:
+          description: Configured max memory in bytes.
+          type: integer
+        storage:
+          description: Configured max disk in bytes.
+          type: integer
+        qemu_agent:
+          description: Whether the QEMU guest agent is enabled. Null for LXC or when
+            unknown.
+          nullable: true
+          type: boolean
+        tags:
+          description: "PVE tags, semicolon-joined (empty string when none). Searchable\
+            \ in the panel."
+          example: prod;web
+          type: string
+    GuestDetail:
+      example:
+        node: pve1
+        disk: 6
+        cores: 2
+        mem: 0
+        vmid: 105
+        ip: 10.10.0.5
+        name: web-01
+        ostype: l26
+        type: qemu
+        host_id: 1
+        status: running
+      properties:
+        host_id:
+          example: 1
+          type: integer
+        vmid:
+          example: 105
+          type: integer
+        type:
+          enum:
+          - qemu
+          - lxc
+          type: string
+        node:
+          example: pve1
+          type: string
+        name:
+          example: web-01
+          type: string
+        status:
+          example: running
+          type: string
+        ip:
+          example: 10.10.0.5
+          type: string
+        cores:
+          example: 2
+          type: integer
+        mem:
+          description: Configured max memory in bytes.
+          type: integer
+        disk:
+          description: Configured max disk in bytes.
+          type: integer
+        ostype:
+          example: l26
+          type: string
+    GuestCreateRequest:
+      description: |
+        Common fields apply to both types. QEMU additionally requires `os_template`. LXC requires exactly one of `lxc_template_id` or `os_template`. `password` is required unless at least one SSH key is present, either via `ssh_keys[]` or an `owner_id` with stored keys.
+      example:
+        lxc_template_id: 2
+        keyctl: true
+        extra_size:
+        - 2
+        - 2
+        bios: seabios
+        owner_id: 7
+        firewall_presets:
+        - 3
+        - 3
+        storage: storage
+        type: qemu
+        snapshot_limit: 9
+        fuse: true
+        vga: std
+        password: password
+        cores: 1
+        extra_mount:
+        - extra_mount
+        - extra_mount
+        nesting: true
+        disk_gb: 5
+        vmid: 0
+        ip_source: dhcp
+        cpu: kvm64
+        mount: mount
+        node: node
+        os_template: os_template
+        ssh_keys:
+        - ssh_keys
+        - ssh_keys
+        unprivileged: true
+        extra_storage:
+        - extra_storage
+        - extra_storage
+        machine: i440fx
+        name: name
+        memory_mb: 5
+        bridge: vmbr0
+        plan_id: 6
+      properties:
+        type:
+          enum:
+          - qemu
+          - lxc
+          type: string
+        node:
+          description: Target PVE node name.
+          type: string
+        vmid:
+          description: "A positive, free VMID. Get one from GET /hosts/{hostId}/next-vmid."
+          type: integer
+        name:
+          description: Guest name/hostname. Defaults to vm-<vmid> or ct-<vmid>.
+          type: string
+        plan_id:
+          description: "A plan id from GET /hosts/{hostId}/plans. Fills and locks\
+            \ cores/memory_mb/disk_gb."
+          type: integer
+        cores:
+          default: 1
+          description: Explicit spec when no plan_id is given.
+          type: integer
+        memory_mb:
+          default: 512
+          description: Explicit spec when no plan_id is given.
+          type: integer
+        disk_gb:
+          default: 8
+          description: Explicit spec when no plan_id is given.
+          type: integer
+        storage:
+          description: "Storage id for the root disk, from GET /hosts/{hostId}/storages."
+          type: string
+        bridge:
+          default: vmbr0
+          description: "Network bridge, from GET /hosts/{hostId}/networks."
+          type: string
+        os_template:
+          description: |
+            Required for QEMU as tpl:<id> from GET /hosts/{hostId}/os-templates. For LXC, an alternative to lxc_template_id, a raw vztmpl volid from GET /hosts/{hostId}/ct-templates.
+          type: string
+        lxc_template_id:
+          description: "LXC only, a managed CT template id from GET /hosts/{hostId}/ct-templates."
+          type: integer
+        ip_source:
+          default: dhcp
+          description: "dhcp (default) or zone:<id> from GET /hosts/{hostId}/ip-zones\
+            \ to allocate a static IP."
+          type: string
+        password:
+          description: Root password. Required unless an SSH key is present.
+          minLength: 5
+          type: string
+        ssh_keys:
+          description: "Public key bodies, merged with the owner's stored keys."
+          items:
+            type: string
+          type: array
+        owner_id:
+          description: Assigns ownership. The owner's stored SSH keys are auto-injected.
+          type: integer
+        snapshot_limit:
+          description: Max snapshots for this guest.
+          type: integer
+        firewall_presets:
+          description: Firewall preset ids to apply.
+          items:
+            type: integer
+          type: array
+        extra_storage:
+          description: "Parallel array with extra_size/extra_mount, additional disk\
+            \ storage ids."
+          items:
+            type: string
+          type: array
+        extra_size:
+          description: "Parallel array with extra_storage/extra_mount, additional\
+            \ disk sizes in GB."
+          items:
+            type: integer
+          type: array
+        extra_mount:
+          description: |
+            Parallel array with extra_storage/extra_size, LXC-only mount paths. Must be absolute paths; blank defaults to /mnt/disk<N>.
+          items:
+            type: string
+          type: array
+        unprivileged:
+          description: |
+            LXC only. Create an unprivileged container. Omitted keeps PVE's default (privileged). For Docker in an unprivileged container also set nesting + keyctl.
+          type: boolean
+        nesting:
+          description: LXC only. Adds nesting=1 to the container features (run Docker
+            / systemd / nested containers).
+          type: boolean
+        keyctl:
+          description: LXC only. Adds keyctl=1 (required for Docker inside an unprivileged
+            container).
+          type: boolean
+        fuse:
+          description: LXC only. Adds fuse=1 (allow FUSE mounts inside the container).
+          type: boolean
+        mount:
+          description: "LXC only. Comma/semicolon list of mount types to allow (allow-listed:\
+            \ nfs, cifs). Invalid types return 422."
+          type: string
+        bios:
+          description: QEMU only. Firmware. ovmf (UEFI) also allocates an EFI disk
+            on the chosen storage. Unrecognised values are ignored.
+          enum:
+          - seabios
+          - ovmf
+          type: string
+        machine:
+          description: QEMU only. Machine type. Unrecognised values are ignored.
+          enum:
+          - i440fx
+          - q35
+          type: string
+        cpu:
+          description: QEMU only. CPU type. Unrecognised values are ignored.
+          enum:
+          - kvm64
+          - host
+          - qemu64
+          - x86-64-v2
+          - x86-64-v2-AES
+          - x86-64-v3
+          - x86-64-v4
+          type: string
+        vga:
+          description: QEMU only. Display adapter. Unrecognised values are ignored.
+          enum:
+          - std
+          - qxl
+          - virtio
+          - vmware
+          - cirrus
+          - serial0
+          - none
+          type: string
+      required:
+      - node
+      - type
+      - vmid
+    ProvisioningQueued:
+      example:
+        vmid: 105
+        job_id: 42
+        queued: true
+      properties:
+        queued:
+          example: true
+          type: boolean
+        job_id:
+          example: 42
+          type: integer
+        vmid:
+          example: 105
+          type: integer
+    ProvisioningJob:
+      example:
+        node: pve1
+        finished_at: 2026-07-14 10:00:42
+        vmid: 105
+        kind: create
+        created_at: 2026-07-14 10:00:00
+        started_at: 2026-07-14 10:00:01
+        id: 42
+        type: qemu
+        error: error
+        status: queued
+        attempts: 0
+      properties:
+        id:
+          example: 42
+          type: integer
+        kind:
+          description: "One of create, reinstall, delete, power."
+          example: create
+          type: string
+        type:
+          enum:
+          - qemu
+          - lxc
+          type: string
+        vmid:
+          example: 105
+          type: integer
+        node:
+          example: pve1
+          type: string
+        status:
+          enum:
+          - queued
+          - running
+          - done
+          - failed
+          type: string
+        error:
+          description: Populated when status is failed.
+          type: string
+        attempts:
+          type: integer
+        created_at:
+          example: 2026-07-14 10:00:00
+          type: string
+        started_at:
+          example: 2026-07-14 10:00:01
+          type: string
+        finished_at:
+          example: 2026-07-14 10:00:42
+          type: string
+    UsageSeries:
+      example:
+        series:
+        - unit: '%'
+          name: cpu
+          points:
+          - - ""
+            - ""
+          - - ""
+            - ""
+        - unit: '%'
+          name: cpu
+          points:
+          - - ""
+            - ""
+          - - ""
+            - ""
+        range: 30m
+      properties:
+        range:
+          enum:
+          - 30m
+          - 3h
+          - 24h
+          type: string
+        series:
+          items:
+            $ref: "#/components/schemas/UsageSeries_series_inner"
+          type: array
+    UsageSummary:
+      example:
+        disk: 2
+        cores: 5
+        mem: 5
+        guests:
+          total: 1
+          up: 0
+          down: 6
+      properties:
+        guests:
+          $ref: "#/components/schemas/UsageSummary_guests"
+        cores:
+          type: integer
+        mem:
+          description: Bytes.
+          type: integer
+        disk:
+          description: Bytes.
+          type: integer
+    UserSummary:
+      example:
+        is_active: 1
+        guests: 0
+        external_id: external_id
+        id: 4
+        email: alice@example.com
+        username: alice
+      properties:
+        id:
+          example: 4
+          type: integer
+        username:
+          example: alice
+          type: string
+        email:
+          example: alice@example.com
+          type: string
+        external_id:
+          nullable: true
+          type: string
+        is_active:
+          example: 1
+          type: integer
+        guests:
+          description: Number of guests owned by this user.
+          type: integer
+    UserCreated:
+      example:
+        password: password
+        external_id: external_id
+        id: 4
+        email: alice@example.com
+        username: alice
+      properties:
+        id:
+          example: 4
+          type: integer
+        username:
+          example: alice
+          type: string
+        email:
+          example: alice@example.com
+          type: string
+        external_id:
+          nullable: true
+          type: string
+        password:
+          description: "Generated password, shown once."
+          type: string
+    GeneratedCredential:
+      description: An account created with a one-time generated password. No external_id
+        on this surface.
+      example:
+        password: password
+        id: 4
+        email: alice@example.com
+        username: alice
+      properties:
+        id:
+          example: 4
+          type: integer
+        username:
+          example: alice
+          type: string
+        email:
+          example: alice@example.com
+          type: string
+        password:
+          description: "Generated password, shown once."
+          type: string
+    ResellerCustomerSummary:
+      example:
+        is_active: 1
+        guests: 0
+        id: 4
+        email: alice@example.com
+        username: alice
+      properties:
+        id:
+          example: 4
+          type: integer
+        username:
+          example: alice
+          type: string
+        email:
+          example: alice@example.com
+          type: string
+        is_active:
+          example: 1
+          type: integer
+        guests:
+          description: Number of guests owned by this customer.
+          type: integer
+    ResellerSummary:
+      example:
+        is_active: 1
+        created_at: 2026-07-01 09:00:00
+        id: 9
+        customers: 0
+        email: ops@acme.example
+        username: acme-hosting
+      properties:
+        id:
+          example: 9
+          type: integer
+        username:
+          example: acme-hosting
+          type: string
+        email:
+          example: ops@acme.example
+          type: string
+        is_active:
+          example: 1
+          type: integer
+        customers:
+          description: Number of customers currently linked to this reseller.
+          type: integer
+        created_at:
+          example: 2026-07-01 09:00:00
+          type: string
+    ResellerPlanInput:
+      example:
+        max_memory_mb: 5
+        is_active: true
+        max_guests: 6
+        max_customers: 0
+        name: name
+        max_disk_gb: 5
+        description: description
+        max_cores: 1
+      properties:
+        name:
+          type: string
+        description:
+          nullable: true
+          type: string
+        max_customers:
+          description: 0 = unlimited.
+          type: integer
+        max_guests:
+          description: 0 = unlimited.
+          type: integer
+        max_cores:
+          description: 0 = unlimited.
+          type: integer
+        max_memory_mb:
+          description: 0 = unlimited.
+          type: integer
+        max_disk_gb:
+          description: 0 = unlimited.
+          type: integer
+        is_active:
+          type: boolean
+      required:
+      - name
+    ResellerPlan:
+      allOf:
+      - $ref: "#/components/schemas/ResellerPlanInput"
+      - properties:
+          id:
+            example: 2
+            type: integer
+      example:
+        max_memory_mb: 5
+        is_active: true
+        max_guests: 6
+        max_customers: 0
+        name: name
+        max_disk_gb: 5
+        description: description
+        id: 2
+        max_cores: 1
+    listHosts_200_response:
+      allOf:
+      - $ref: "#/components/schemas/Envelope"
+      - properties:
+          data:
+            items:
+              $ref: "#/components/schemas/Host"
+            type: array
+      example:
+        data:
+        - hostname: 188.40.137.121
+          port: 8006
+          name: Test
+          active: true
+          id: 1
+          user: root@pam
+        - hostname: 188.40.137.121
+          port: 8006
+          name: Test
+          active: true
+          id: 1
+          user: root@pam
+        success: true
+        meta:
+          total: 137
+          perPage: 50
+          page: 1
+        error: error
+    createHost_request:
+      properties:
+        name:
+          type: string
+        hostname:
+          type: string
+        port:
+          default: 8006
+          type: integer
+        username:
+          default: root
+          type: string
+        realm:
+          default: pam
+          type: string
+        password:
+          type: string
+        verify_tls:
+          type: boolean
+      required:
+      - hostname
+      - name
+      - password
+    listNodes_200_response:
+      allOf:
+      - $ref: "#/components/schemas/Envelope"
+      - properties:
+          data:
+            items:
+              $ref: "#/components/schemas/NodeSummary"
+            type: array
+      example:
+        data:
+        - node: pve1
+          disk: 21474836480
+          mem: 4294967296
+          maxdisk: 107374182400
+          cpu: 0.03
+          maxcpu: 8
+          maxmem: 34359738368
+          status: online
+          uptime: 1234567
+        - node: pve1
+          disk: 21474836480
+          mem: 4294967296
+          maxdisk: 107374182400
+          cpu: 0.03
+          maxcpu: 8
+          maxmem: 34359738368
+          status: online
+          uptime: 1234567
+        success: true
+        meta:
+          total: 137
+          perPage: 50
+          page: 1
+        error: error
+    getNode_200_response:
+      allOf:
+      - $ref: "#/components/schemas/Envelope"
+      - properties:
+          data:
+            $ref: "#/components/schemas/NodeDetail"
+      example:
+        data: null
+        success: true
+        meta:
+          total: 137
+          perPage: 50
+          page: 1
+        error: error
+    getNodeUsage_200_response:
+      allOf:
+      - $ref: "#/components/schemas/Envelope"
+      - properties:
+          data:
+            $ref: "#/components/schemas/UsageSeries"
+      example:
+        data:
+          series:
+          - unit: '%'
+            name: cpu
+            points:
+            - - ""
+              - ""
+            - - ""
+              - ""
+          - unit: '%'
+            name: cpu
+            points:
+            - - ""
+              - ""
+            - - ""
+              - ""
+          range: 30m
+        success: true
+        meta:
+          total: 137
+          perPage: 50
+          page: 1
+        error: error
+    getUsageSummary_200_response:
+      allOf:
+      - $ref: "#/components/schemas/Envelope"
+      - properties:
+          data:
+            $ref: "#/components/schemas/UsageSummary"
+      example:
+        data:
+          disk: 2
+          cores: 5
+          mem: 5
+          guests:
+            total: 1
+            up: 0
+            down: 6
+        success: true
+        meta:
+          total: 137
+          perPage: 50
+          page: 1
+        error: error
+    listStorages_200_response:
+      allOf:
+      - $ref: "#/components/schemas/Envelope"
+      - properties:
+          data:
+            items:
+              $ref: "#/components/schemas/Storage"
+            type: array
+          meta:
+            $ref: "#/components/schemas/PaginationMeta"
+      example:
+        data:
+        - node: pve1
+          avail: 1
+          total: 0
+          used_pct: 24.0
+          active: true
+          id: local-lvm
+          used: 6
+          type: lvmthin
+          content: "images,rootdir"
+        - node: pve1
+          avail: 1
+          total: 0
+          used_pct: 24.0
+          active: true
+          id: local-lvm
+          used: 6
+          type: lvmthin
+          content: "images,rootdir"
+        success: true
+        meta:
+          total: 137
+          perPage: 50
+          page: 1
+        error: error
+    listNetworks_200_response:
+      allOf:
+      - $ref: "#/components/schemas/Envelope"
+      - properties:
+          data:
+            items:
+              $ref: "#/components/schemas/NetworkInterface"
+            type: array
+          meta:
+            $ref: "#/components/schemas/PaginationMeta"
+      example:
+        data:
+        - iface: vmbr0
+          node: pve1
+          role: WAN
+          active: true
+          cidr: 203.0.113.0/24
+          type: bridge
+          ports: eno1
+          gateway: 203.0.113.1
+        - iface: vmbr0
+          node: pve1
+          role: WAN
+          active: true
+          cidr: 203.0.113.0/24
+          type: bridge
+          ports: eno1
+          gateway: 203.0.113.1
+        success: true
+        meta:
+          total: 137
+          perPage: 50
+          page: 1
+        error: error
+    getNextVmid_200_response_allOf_data:
+      example:
+        next_vmid: 105
+      properties:
+        next_vmid:
+          example: 105
+          type: integer
+    getNextVmid_200_response:
+      allOf:
+      - $ref: "#/components/schemas/Envelope"
+      - properties:
+          data:
+            $ref: "#/components/schemas/getNextVmid_200_response_allOf_data"
+      example:
+        data:
+          next_vmid: 105
+        success: true
+        meta:
+          total: 137
+          perPage: 50
+          page: 1
+        error: error
+    listPlans_200_response:
+      allOf:
+      - $ref: "#/components/schemas/Envelope"
+      - properties:
+          data:
+            items:
+              $ref: "#/components/schemas/Plan"
+            type: array
+          meta:
+            $ref: "#/components/schemas/PaginationMeta"
+      example:
+        data:
+        - cores: 2
+          runtime_days: 6
+          name: Standard
+          description: description
+          memory_mb: 2048
+          traffic_limit_gb: 0
+          id: 2
+          snapshot_limit: 5
+          grace_days: 1
+          disk_gb: 20
+        - cores: 2
+          runtime_days: 6
+          name: Standard
+          description: description
+          memory_mb: 2048
+          traffic_limit_gb: 0
+          id: 2
+          snapshot_limit: 5
+          grace_days: 1
+          disk_gb: 20
+        success: true
+        meta:
+          total: 137
+          perPage: 50
+          page: 1
+        error: error
+    listOsTemplates_200_response:
+      allOf:
+      - $ref: "#/components/schemas/Envelope"
+      - properties:
+          data:
+            items:
+              $ref: "#/components/schemas/OsTemplate"
+            type: array
+          meta:
+            $ref: "#/components/schemas/PaginationMeta"
+      example:
+        data:
+        - ref: tpl:7
+          ci_user: ubuntu
+          is_shipped: true
+          group_id: 0
+          group_name: General
+          name: Ubuntu 24.04
+          description: description
+          id: 7
+          ostype: l26
+        - ref: tpl:7
+          ci_user: ubuntu
+          is_shipped: true
+          group_id: 0
+          group_name: General
+          name: Ubuntu 24.04
+          description: description
+          id: 7
+          ostype: l26
+        success: true
+        meta:
+          total: 137
+          perPage: 50
+          page: 1
+        error: error
+    listCtTemplates_200_response:
+      allOf:
+      - $ref: "#/components/schemas/Envelope"
+      - properties:
+          data:
+            $ref: "#/components/schemas/CtTemplates"
+      example:
+        data:
+          managed:
+          - lxc_template_id: 3
+            unprivileged: true
+            group_id: 0
+            name: Debian 12
+            description: description
+            ostype: debian
+            arch: amd64
+            source: shipped
+          - lxc_template_id: 3
+            unprivileged: true
+            group_id: 0
+            name: Debian 12
+            description: description
+            ostype: debian
+            arch: amd64
+            source: shipped
+          available:
+          - node: pve1
+            size: 6
+            format: tar.zst
+            volid: local:vztmpl/debian-12-standard_12.7-1_amd64.tar.zst
+          - node: pve1
+            size: 6
+            format: tar.zst
+            volid: local:vztmpl/debian-12-standard_12.7-1_amd64.tar.zst
+        success: true
+        meta:
+          total: 137
+          perPage: 50
+          page: 1
+        error: error
+    listIpZones_200_response:
+      allOf:
+      - $ref: "#/components/schemas/Envelope"
+      - properties:
+          data:
+            items:
+              $ref: "#/components/schemas/IpZone"
+            type: array
+          meta:
+            $ref: "#/components/schemas/PaginationMeta"
+      example:
+        data:
+        - ref: zone:3
+          is_active: true
+          vlan: vlan
+          name: Private LAN
+          cidr: 10.10.0.0/24
+          id: 3
+          bridge: vmbr1
+          family: ipv4
+          gateway: 10.10.0.1
+        - ref: zone:3
+          is_active: true
+          vlan: vlan
+          name: Private LAN
+          cidr: 10.10.0.0/24
+          id: 3
+          bridge: vmbr1
+          family: ipv4
+          gateway: 10.10.0.1
+        success: true
+        meta:
+          total: 137
+          perPage: 50
+          page: 1
+        error: error
+    listUserSshKeys_200_response:
+      allOf:
+      - $ref: "#/components/schemas/Envelope"
+      - properties:
+          data:
+            items:
+              $ref: "#/components/schemas/SshKey"
+            type: array
+      example:
+        data:
+        - name: laptop
+          fingerprint: SHA256:9f0b6c...
+          id: 5
+        - name: laptop
+          fingerprint: SHA256:9f0b6c...
+          id: 5
+        success: true
+        meta:
+          total: 137
+          perPage: 50
+          page: 1
+        error: error
+    addUserSshKey_request:
+      properties:
+        name:
+          type: string
+        public_key:
+          type: string
+      required:
+      - public_key
+    listGuests_200_response:
+      allOf:
+      - $ref: "#/components/schemas/Envelope"
+      - properties:
+          data:
+            items:
+              $ref: "#/components/schemas/GuestListItem"
+            type: array
+          meta:
+            $ref: "#/components/schemas/PaginationMeta"
+      example:
+        data:
+        - os: l26
+          vmid: 105
+          qemu_agent: true
+          ip: 10.10.0.5
+          storage: 6
+          type: qemu
+          host_id: 1
+          tags: prod;web
+          node: pve1
+          cores: 2
+          mem: 0
+          host: Test
+          name: web-01
+          status: running
+        - os: l26
+          vmid: 105
+          qemu_agent: true
+          ip: 10.10.0.5
+          storage: 6
+          type: qemu
+          host_id: 1
+          tags: prod;web
+          node: pve1
+          cores: 2
+          mem: 0
+          host: Test
+          name: web-01
+          status: running
+        success: true
+        meta:
+          total: 137
+          perPage: 50
+          page: 1
+        error: error
+    createGuest_200_response:
+      allOf:
+      - $ref: "#/components/schemas/Envelope"
+      - properties:
+          data:
+            $ref: "#/components/schemas/ProvisioningQueued"
+      example:
+        data:
+          vmid: 105
+          job_id: 42
+          queued: true
+        success: true
+        meta:
+          total: 137
+          perPage: 50
+          page: 1
+        error: error
+    getGuest_200_response:
+      allOf:
+      - $ref: "#/components/schemas/Envelope"
+      - properties:
+          data:
+            $ref: "#/components/schemas/GuestDetail"
+      example:
+        data:
+          node: pve1
+          disk: 6
+          cores: 2
+          mem: 0
+          vmid: 105
+          ip: 10.10.0.5
+          name: web-01
+          ostype: l26
+          type: qemu
+          host_id: 1
+          status: running
+        success: true
+        meta:
+          total: 137
+          perPage: 50
+          page: 1
+        error: error
+    powerGuest_request:
+      properties:
+        node:
+          description: The PVE node the guest currently lives on.
+          type: string
+        action:
+          enum:
+          - start
+          - stop
+          - shutdown
+          - reboot
+          - suspend
+          - resume
+          type: string
+      required:
+      - action
+      - node
+    reinstallGuest_request:
+      properties:
+        node:
+          description: The PVE node the guest currently lives on.
+          type: string
+        os_template:
+          description: "`tpl:<id>` for QEMU, or a `vztmpl` volid for LXC."
+          type: string
+        password:
+          description: "New root password, minimum 5 characters."
+          type: string
+        ssh_keys:
+          description: "Public key bodies, merged with any owner-stored keys."
+          items:
+            type: string
+          type: array
+        owner_id:
+          description: "When set, the owner's stored SSH keys are merged into the\
+            \ reinstall (same as create)."
+          type: integer
+        name:
+          description: Optional new guest name.
+          type: string
+      required:
+      - node
+      - os_template
+    setGuestPassword_request:
+      properties:
+        node:
+          description: The PVE node the guest currently lives on.
+          type: string
+        password:
+          minLength: 5
+          type: string
+        username:
+          description: Defaults to root.
+          type: string
+      required:
+      - node
+      - password
+    setGuestPassword_200_response_allOf_data_oneOf:
+      properties:
+        changed:
+          example: true
+          type: boolean
+    setGuestPassword_200_response_allOf_data:
+      oneOf:
+      - $ref: "#/components/schemas/ProvisioningQueued"
+      - $ref: "#/components/schemas/setGuestPassword_200_response_allOf_data_oneOf"
+    setGuestPassword_200_response:
+      allOf:
+      - $ref: "#/components/schemas/Envelope"
+      - properties:
+          data:
+            $ref: "#/components/schemas/setGuestPassword_200_response_allOf_data"
+      example:
+        data:
+          vmid: 105
+          job_id: 42
+          queued: true
+        success: true
+        meta:
+          total: 137
+          perPage: 50
+          page: 1
+        error: error
+    setGuestIpconfig_request:
+      properties:
+        node:
+          description: The PVE node the guest currently lives on.
+          type: string
+        ipconfig:
+          description: "For example \"ip=dhcp\" or \"ip=1.2.3.4/24,gw=1.2.3.1\"."
+          type: string
+        bridge:
+          description: Defaults to vmbr0.
+          type: string
+      required:
+      - ipconfig
+      - node
+    getProvisioningJob_200_response:
+      allOf:
+      - $ref: "#/components/schemas/Envelope"
+      - properties:
+          data:
+            $ref: "#/components/schemas/ProvisioningJob"
+      example:
+        data:
+          node: pve1
+          finished_at: 2026-07-14 10:00:42
+          vmid: 105
+          kind: create
+          created_at: 2026-07-14 10:00:00
+          started_at: 2026-07-14 10:00:01
+          id: 42
+          type: qemu
+          error: error
+          status: queued
+          attempts: 0
+        success: true
+        meta:
+          total: 137
+          perPage: 50
+          page: 1
+        error: error
+    listUsers_200_response:
+      allOf:
+      - $ref: "#/components/schemas/Envelope"
+      - properties:
+          data:
+            items:
+              $ref: "#/components/schemas/UserSummary"
+            type: array
+      example:
+        data:
+        - is_active: 1
+          guests: 0
+          external_id: external_id
+          id: 4
+          email: alice@example.com
+          username: alice
+        - is_active: 1
+          guests: 0
+          external_id: external_id
+          id: 4
+          email: alice@example.com
+          username: alice
+        success: true
+        meta:
+          total: 137
+          perPage: 50
+          page: 1
+        error: error
+    createUser_request:
+      properties:
+        email:
+          format: email
+          type: string
+        username:
+          type: string
+        user_id:
+          description: Optional external id to correlate with your own system.
+          type: string
+      required:
+      - email
+      - username
+    createUser_200_response:
+      allOf:
+      - $ref: "#/components/schemas/Envelope"
+      - properties:
+          data:
+            $ref: "#/components/schemas/UserCreated"
+      example:
+        data:
+          password: password
+          external_id: external_id
+          id: 4
+          email: alice@example.com
+          username: alice
+        success: true
+        meta:
+          total: 137
+          perPage: 50
+          page: 1
+        error: error
+    assignUserGuest_request:
+      properties:
+        host_id:
+          type: integer
+        type:
+          enum:
+          - qemu
+          - lxc
+          type: string
+        vmid:
+          type: integer
+      required:
+      - host_id
+      - type
+      - vmid
+    createSnapshot_request:
+      properties:
+        node:
+          type: string
+        name:
+          description: Snapshot name (letter then letters/digits/underscore).
+          type: string
+        description:
+          type: string
+        vmstate:
+          description: "QEMU only: also save the running RAM state."
+          type: boolean
+      required:
+      - name
+      - node
+    rollbackSnapshot_request:
+      properties:
+        node:
+          type: string
+      required:
+      - node
+    resizeGuest_request:
+      properties:
+        node:
+          type: string
+        cores:
+          type: integer
+        memory_mb:
+          type: integer
+        disk:
+          description: "Disk slot, for example scsi0 or rootfs."
+          type: string
+        size:
+          description: "PVE size token, for example +10G."
+          type: string
+      required:
+      - node
+    setGuestIpFilter_request:
+      properties:
+        node:
+          type: string
+        enable:
+          type: boolean
+      required:
+      - node
+    assignGuestIp_request:
+      properties:
+        ip_id:
+          type: integer
+        node:
+          description: Optional; helps resync when the guest is not yet in inventory.
+          type: string
+      required:
+      - ip_id
+    createGuestFirewallRule_request:
+      properties:
+        node:
+          type: string
+        direction:
+          enum:
+          - in
+          - out
+          type: string
+        action:
+          enum:
+          - ACCEPT
+          - DROP
+          - REJECT
+          type: string
+        proto:
+          type: string
+        dport:
+          type: string
+        sport:
+          type: string
+        source:
+          type: string
+        dest:
+          type: string
+        comment:
+          type: string
+        enabled:
+          type: boolean
+      required:
+      - action
+      - direction
+      - node
+    setGuestFirewallOptions_request:
+      properties:
+        node:
+          type: string
+        enabled:
+          type: boolean
+        policy_in:
+          enum:
+          - ACCEPT
+          - DROP
+          - REJECT
+          type: string
+        policy_out:
+          enum:
+          - ACCEPT
+          - DROP
+          - REJECT
+          type: string
+      required:
+      - node
+    setNatSettings_request:
+      properties:
+        enabled:
+          type: boolean
+        wan_iface:
+          type: string
+        private_cidr:
+          description: "RFC1918 CIDR, for example 10.0.10.0/24."
+          type: string
+        masquerade:
+          type: boolean
+      required:
+      - private_cidr
+      - wan_iface
+    createPortForward_request:
+      properties:
+        proto:
+          enum:
+          - tcp
+          - udp
+          type: string
+        public_port:
+          type: integer
+        dest_ip:
+          type: string
+        dest_port:
+          type: integer
+        comment:
+          type: string
+      required:
+      - dest_ip
+      - dest_port
+      - proto
+      - public_port
+    updateHost_request:
+      properties:
+        name:
+          type: string
+        hostname:
+          type: string
+        port:
+          type: integer
+        username:
+          type: string
+        realm:
+          type: string
+        password:
+          type: string
+        verify_tls:
+          type: boolean
+    grantUserIps_request:
+      properties:
+        zone_id:
+          type: integer
+        mode:
+          default: zone
+          enum:
+          - zone
+          - specific
+          type: string
+        count:
+          type: integer
+        ids:
+          items:
+            type: integer
+          type: array
+      required:
+      - zone_id
+    createAlertRule_request:
+      properties:
+        name:
+          type: string
+        type:
+          enum:
+          - guest_down
+          - node_unreachable
+          - cpu_high
+          - mem_high
+          - disk_high
+          - agent_unhealthy
+          - plan_traffic
+          - plan_expiry
+          type: string
+        severity:
+          enum:
+          - info
+          - warning
+          - critical
+          type: string
+        channels:
+          items:
+            enum:
+            - inbox
+            - email
+            - webhook
+            type: string
+          type: array
+        threshold:
+          type: number
+        duration_minutes:
+          type: integer
+        host_id:
+          type: integer
+          nullable: true
+        node:
+          type: string
+          nullable: true
+        guest_type:
+          type: string
+          nullable: true
+        vmid:
+          type: integer
+          nullable: true
+        cooldown_minutes:
+          type: integer
+          nullable: true
+        enabled:
+          type: boolean
+      required:
+      - channels
+      - duration_minutes
+      - severity
+      - type
+    listResellers_200_response:
+      allOf:
+      - $ref: "#/components/schemas/Envelope"
+      - properties:
+          data:
+            items:
+              $ref: "#/components/schemas/ResellerSummary"
+            type: array
+      example:
+        data:
+        - is_active: 1
+          created_at: 2026-07-01 09:00:00
+          id: 9
+          customers: 0
+          email: ops@acme.example
+          username: acme-hosting
+        - is_active: 1
+          created_at: 2026-07-01 09:00:00
+          id: 9
+          customers: 0
+          email: ops@acme.example
+          username: acme-hosting
+        success: true
+        meta:
+          total: 137
+          perPage: 50
+          page: 1
+        error: error
+    createReseller_request:
+      properties:
+        username:
+          type: string
+        email:
+          format: email
+          type: string
+      required:
+      - email
+      - username
+    createReseller_200_response:
+      allOf:
+      - $ref: "#/components/schemas/Envelope"
+      - properties:
+          data:
+            $ref: "#/components/schemas/GeneratedCredential"
+      example:
+        data:
+          password: password
+          id: 4
+          email: alice@example.com
+          username: alice
+        success: true
+        meta:
+          total: 137
+          perPage: 50
+          page: 1
+        error: error
+    updateReseller_request:
+      properties:
+        username:
+          type: string
+        email:
+          format: email
+          type: string
+        is_active:
+          type: boolean
+      required:
+      - email
+      - username
+    assignResellerCustomer_request:
+      properties:
+        customer_id:
+          type: integer
+      required:
+      - customer_id
+    assignResellerPlan_request:
+      properties:
+        reseller_plan_id:
+          type: integer
+      required:
+      - reseller_plan_id
+    assignResellerNode_request:
+      properties:
+        host_id:
+          type: integer
+        node:
+          type: string
+      required:
+      - host_id
+      - node
+    assignResellerZone_request:
+      properties:
+        ip_zone_id:
+          type: integer
+      required:
+      - ip_zone_id
+    listResellerPlans_200_response:
+      allOf:
+      - $ref: "#/components/schemas/Envelope"
+      - properties:
+          data:
+            items:
+              $ref: "#/components/schemas/ResellerPlan"
+            type: array
+      example:
+        data:
+        - max_memory_mb: 5
+          is_active: true
+          max_guests: 6
+          max_customers: 0
+          name: name
+          max_disk_gb: 5
+          description: description
+          id: 2
+          max_cores: 1
+        - max_memory_mb: 5
+          is_active: true
+          max_guests: 6
+          max_customers: 0
+          name: name
+          max_disk_gb: 5
+          description: description
+          id: 2
+          max_cores: 1
+        success: true
+        meta:
+          total: 137
+          perPage: 50
+          page: 1
+        error: error
+    createResellerPlan_200_response:
+      allOf:
+      - $ref: "#/components/schemas/Envelope"
+      - properties:
+          data:
+            $ref: "#/components/schemas/ResellerPlan"
+      example:
+        data:
+          max_memory_mb: 5
+          is_active: true
+          max_guests: 6
+          max_customers: 0
+          name: name
+          max_disk_gb: 5
+          description: description
+          id: 2
+          max_cores: 1
+        success: true
+        meta:
+          total: 137
+          perPage: 50
+          page: 1
+        error: error
+    listResellerCustomers_200_response:
+      allOf:
+      - $ref: "#/components/schemas/Envelope"
+      - properties:
+          data:
+            items:
+              $ref: "#/components/schemas/ResellerCustomerSummary"
+            type: array
+      example:
+        data:
+        - is_active: 1
+          guests: 0
+          id: 4
+          email: alice@example.com
+          username: alice
+        - is_active: 1
+          guests: 0
+          id: 4
+          email: alice@example.com
+          username: alice
+        success: true
+        meta:
+          total: 137
+          perPage: 50
+          page: 1
+        error: error
+    createResellerGuest_request:
+      additionalProperties: {}
+      properties:
+        owner_id:
+          description: One of the calling reseller's own customer ids.
+        host_id:
+          type: integer
+        node:
+          type: string
+        type:
+          enum:
+          - qemu
+          - lxc
+          type: string
+        vmid:
+          type: integer
+        name:
+          type: string
+        storage:
+          type: string
+        plan_id:
+          type: integer
+        cores:
+          type: integer
+        memory_mb:
+          type: integer
+        disk_gb:
+          type: integer
+        bridge:
+          type: string
+        os_template:
+          description: qemu `tpl:<id>` or lxc CT template volid.
+        ip_source:
+          enum:
+          - dhcp
+          - zone
+        ipv4_zone_id:
+          type: integer
+        ipv6_zone_id:
+          type: integer
+        password:
+          type: string
+      required:
+      - host_id
+      - node
+      - owner_id
+      - storage
+      - type
+      - vmid
+    powerResellerGuest_request:
+      properties:
+        node:
+          type: string
+        action:
+          enum:
+          - start
+          - stop
+          - shutdown
+          - reboot
+          - suspend
+          - resume
+          type: string
+      required:
+      - action
+      - node
+    changeResellerGuestIp_request:
+      properties:
+        node:
+          type: string
+        action:
+          enum:
+          - change
+          - release
+          type: string
+        zone_id:
+          type: integer
+        ip:
+          description: Required when action=change.
+          type: string
+      required:
+      - action
+      - node
+    UsageSeries_series_inner:
+      example:
+        unit: '%'
+        name: cpu
+        points:
+        - - ""
+          - ""
+        - - ""
+          - ""
+      properties:
+        name:
+          example: cpu
+          type: string
+        unit:
+          example: '%'
+          type: string
+        points:
+          description: "[epoch_ms, value] pairs."
+          items:
+            items: {}
+            maxItems: 2
+            minItems: 2
+            type: array
+          type: array
+    UsageSummary_guests:
+      example:
+        total: 1
+        up: 0
+        down: 6
+      properties:
+        up:
+          type: integer
+        down:
+          type: integer
+        total:
+          type: integer
+  securitySchemes:
+    bearerAuth:
+      description: |
+        A NexoVirt API token, created in the panel under Settings, API tokens. Send it as `Authorization: Bearer <token>`.
+      scheme: bearer
+      type: http
+    resellerBearerAuth:
+      description: |
+        A reseller API token, issued in the reseller portal under API tokens (separate from the admin `/api/v1` bearerAuth tokens above). Send it as `Authorization: Bearer <token>` against the `/api/reseller` server. Every endpoint is scoped to the calling reseller's own customers, guests, nodes, and IP zones; an id outside that subtree returns `404`, not `403`, so cross-tenant existence is never leaked.
+      scheme: bearer
+      type: http
+
