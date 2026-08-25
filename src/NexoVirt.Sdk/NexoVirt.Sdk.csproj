@@ -6,17 +6,20 @@
     <AssemblyName>NexoVirt.Sdk</AssemblyName>
     <PackageId>NexoVirt.Sdk</PackageId>
     <OutputType>Library</OutputType>
-    <Authors>OpenAPI</Authors>
-    <Company>OpenAPI</Company>
-    <AssemblyTitle>OpenAPI Library</AssemblyTitle>
-    <Description>A library generated from a OpenAPI doc</Description>
-    <Copyright>No Copyright</Copyright>
+    <Authors>NexoVirt</Authors>
+    <Company>NexoVirt</Company>
+    <AssemblyTitle>NexoVirt SDK</AssemblyTitle>
+    <Description>Official .NET SDK for the NexoVirt REST API over Proxmox VE (hosts, guests, plans, IPAM, firewall, snapshots).</Description>
+    <Copyright>Copyright (c) NexoVirt</Copyright>
     <RootNamespace>NexoVirt.Sdk</RootNamespace>
     <Version>0.1.0</Version>
     <DocumentationFile>bin\$(Configuration)\$(TargetFramework)\NexoVirt.Sdk.xml</DocumentationFile>
-    <RepositoryUrl>https://github.com/GIT_USER_ID/GIT_REPO_ID.git</RepositoryUrl>
+    <PackageProjectUrl>https://nexovirt.com</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/NexoVirt/nexovirt-csharp.git</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
-    <PackageReleaseNotes>Minor update</PackageReleaseNotes>
+    <PackageTags>nexovirt;proxmox;proxmox-ve;vps;virtualization;rest-api;sdk;kvm;lxc</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReleaseNotes>Initial release.</PackageReleaseNotes>
     <Nullable>annotations</Nullable>
     <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
   </PropertyGroup>
